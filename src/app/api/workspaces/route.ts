@@ -22,6 +22,7 @@ function safeParseJSON<T>(val: any, fallback: T): T {
     return fallback;
   }
 }
+debugger
 
 // Build full nested workspace payload
 async function buildWorkspaceData(db: any, workspaceId: string) {
@@ -191,7 +192,7 @@ export async function GET(request: NextRequest) {
   try {
     // Always ensure database is set up
     await setupDatabase();
-
+    debugger
     const db = await getConnection();
     const { searchParams } = new URL(request.url);
     const workspaceId = searchParams.get("id");

@@ -537,7 +537,7 @@ export const Sidebar: React.FC = () => {
               <Loader2 className="w-4 h-4 animate-spin text-blue-500 flex-shrink-0" />
             )}
           </div>
-          
+        
           <div className="relative">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500" size={16} />
             <input
@@ -553,6 +553,7 @@ export const Sidebar: React.FC = () => {
         {/* Error Display */}
         {state.error && (
           <div className="mx-4 mt-4 p-3 bg-red-900/50 border-l-4 border-red-500 rounded">
+            debug
             <p className="text-sm text-red-200">{state.error}</p>
           </div>
         )}

@@ -1,7 +1,7 @@
 import { Workspace, PageItem, ContentBlock, Comment, Section } from '@/types';
 
 const API_BASE_URL = process.env.NODE_ENV === 'production' 
-  ? process.env.NEXT_PUBLIC_API_URL 
+  ? '/api' 
   : '/api';
 
 // Generic fetch wrapper with error handling

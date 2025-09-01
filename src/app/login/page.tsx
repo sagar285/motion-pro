@@ -1,11 +1,11 @@
 // app/login/page.tsx
 'use client';
 
-import { useState, useEffect, JSX } from 'react';
+import { useState, useEffect, JSX, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ChevronRight, Eye, EyeOff, Lock, Mail, Shield } from 'lucide-react';
 
-export default function LoginPage(): JSX.Element {
+function LoginForm(): JSX.Element {
   const [showPassword, setShowPassword] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -788,5 +788,52 @@ export default function LoginPage(): JSX.Element {
         </div>
       </div>
     </div>
+  );
+}
+
+// Fallback component for loading state
+function LoginFallback(): JSX.Element {
+  return (
+    <div 
+      style={{
+        minHeight: '100vh',
+        background: 'linear-gradient(135deg, #0f172a 0%, #1e3a8a 30%, #3730a3 60%, #1e1b4b 100%)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '16px'
+      }}
+    >
+      <div style={{ textAlign: 'center', color: 'white' }}>
+        <div 
+          style={{
+            width: '40px',
+            height: '40px',
+            border: '4px solid rgba(255, 255, 255, 0.3)',
+            borderTop: '4px solid white',
+            borderRadius: '50%',
+            animation: 'spin 1s linear infinite',
+            margin: '0 auto 16px'
+          }}
+        />
+        <p>Loading...</p>
+      </div>
+      <style dangerouslySetInnerHTML={{
+        __html: `
+          @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+          }
+        `
+      }} />
+    </div>
+  );
+}
+
+export default function LoginPage(): JSX.Element {
+  return (
+    <Suspense fallback={<LoginFallback />}>
+      <LoginForm />
+    </Suspense>
   );
 }

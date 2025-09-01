@@ -65,14 +65,14 @@ export async function POST(request: NextRequest): Promise<NextResponse<LoginResp
       );
     }
 
-    // Generate JWT token
+    // Generate JWT token using JOSE (now async)
     const tokenPayload = {
       id: user.id,
       email: user.email,
       name: user.name
     };
     
-    const token = generateToken(tokenPayload);
+    const token = await generateToken(tokenPayload); // Added await since generateToken is now async
 
     // Create response
     const response = NextResponse.json({
@@ -88,15 +88,16 @@ export async function POST(request: NextRequest): Promise<NextResponse<LoginResp
     });
 
     // Set HTTP-only cookie for token
-    const cookieOptions = {
+    // Fixed maxAge calculation (should be in seconds, not milliseconds for Next.js cookies)
+    const maxAgeInSeconds = rememberMe ? 7 * 24 * 60 * 60 : 24 * 60 * 60; // 7 days or 1 day in seconds
+    
+    response.cookies.set('auth-token', token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict' as const,
-      maxAge: rememberMe ? 7 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000, // 7 days or 1 day
+      sameSite: 'strict',
+      maxAge: maxAgeInSeconds,
       path: '/'
-    };
-
-    response.cookies.set('auth-token', token, cookieOptions);
+    });
 
     return response;
 

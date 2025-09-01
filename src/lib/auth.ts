@@ -1,6 +1,6 @@
 // lib/auth.ts
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
+import { SignJWT, jwtVerify } from 'jose';
 import { getConnection } from './database';
 import { RowDataPacket, ResultSetHeader } from 'mysql2';
 
@@ -33,7 +33,7 @@ export interface UserResponse {
   email_verified: boolean;
 }
 
-export interface JWTPayload {
+export interface CustomJWTPayload {
   id: number;
   email: string;
   name: string;
@@ -66,6 +66,20 @@ export interface SessionData {
   created_at: Date;
 }
 
+// JWT Secret as Uint8Array (required by JOSE)
+const JWT_SECRET = new TextEncoder().encode("Aman1234");
+
+// Type guard function for JWT payload validation
+function isCustomJWTPayload(payload: any): payload is CustomJWTPayload {
+  return (
+    payload &&
+    typeof payload === 'object' &&
+    typeof payload.id === 'number' &&
+    typeof payload.email === 'string' &&
+    typeof payload.name === 'string'
+  );
+}
+
 // Password Management
 export async function hashPassword(password: string): Promise<string> {
   if (!password || password.length < 6) {
@@ -81,41 +95,68 @@ export async function verifyPassword(password: string, hashedPassword: string): 
   return await bcrypt.compare(password, hashedPassword);
 }
 
-// JWT Token Management
-export function generateToken(payload: Omit<JWTPayload, 'iat' | 'exp'>): string {
-  if (!"Aman1234") {
+// JWT Token Management with JOSE
+export async function generateToken(payload: Omit<CustomJWTPayload, 'iat' | 'exp'>): Promise<string> {
+  if (!JWT_SECRET) {
     throw new Error('JWT_SECRET environment variable is not set');
   }
   
-  return jwt.sign(payload, "Aman1234", {
-    expiresIn: '7d',
-    issuer: 'motion-pro',
-    audience: 'motion-pro-users'
-  });
+  try {
+    const jwt = await new SignJWT({
+      id: payload.id,
+      email: payload.email,
+      name: payload.name
+    })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setIssuedAt()
+      .setIssuer('motion-pro')
+      .setAudience('motion-pro-users')
+      .setExpirationTime('7d')
+      .sign(JWT_SECRET);
+    
+    return jwt;
+  } catch (error) {
+    console.error('JWT generation failed:', error);
+    throw new Error('Failed to generate token');
+  }
 }
 
-export function verifyToken(token: string): JWTPayload | null {
+export async function verifyToken(token: string): Promise<CustomJWTPayload | null> {
   try {
-    if (!'Aman1234' || !token) {
+    if (!JWT_SECRET || !token) {
       return null;
     }
     
-    return jwt.verify(token, 'Aman1234', {
+    const { payload } = await jwtVerify(token, JWT_SECRET, {
       issuer: 'motion-pro',
       audience: 'motion-pro-users'
-    }) as JWTPayload;
+    });
+    
+    // Use type guard for safe validation
+    if (isCustomJWTPayload(payload)) {
+      return payload;
+    }
+    
+    return null;
   } catch (error) {
     console.error('JWT verification failed:', error);
     return null;
   }
 }
 
-export function generateRefreshToken(): string {
-  return jwt.sign(
-    { type: 'refresh' }, 
-    'Aman1234' as string, 
-    { expiresIn: '30d' }
-  );
+export async function generateRefreshToken(): Promise<string> {
+  try {
+    const jwt = await new SignJWT({ type: 'refresh' })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setIssuedAt()
+      .setExpirationTime('30d')
+      .sign(JWT_SECRET);
+    
+    return jwt;
+  } catch (error) {
+    console.error('Refresh token generation failed:', error);
+    throw new Error('Failed to generate refresh token');
+  }
 }
 
 // OTP Management

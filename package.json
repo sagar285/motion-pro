@@ -10,7 +10,6 @@
   },
   "dependencies": {
     "@types/bcryptjs": "^2.4.6",
-    "@types/jsonwebtoken": "^9.0.10",
     "@types/nodemailer": "^7.0.1",
     "@types/pg": "^8.15.5",
     "bcryptjs": "^3.0.2",

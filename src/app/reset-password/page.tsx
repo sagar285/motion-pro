@@ -1,7 +1,7 @@
 // app/reset-password/page.tsx
 'use client';
 
-import { useState, useEffect, JSX } from 'react';
+import { useState, useEffect, JSX, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ChevronRight, Eye, EyeOff, Lock, Shield, CheckCircle, ArrowLeft } from 'lucide-react';
 
@@ -18,7 +18,7 @@ interface PasswordStrength {
   color: string;
 }
 
-export default function ResetPasswordPage(): JSX.Element {
+function ResetPasswordForm(): JSX.Element {
   const [formData, setFormData] = useState<ResetFormData>({
     email: '',
     otp: ['', '', '', '', '', ''],
@@ -256,6 +256,17 @@ export default function ResetPasswordPage(): JSX.Element {
             box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.3) !important;
             outline: none;
           }
+          
+          @media (max-width: 768px) {
+            .mobile-container {
+              padding: 16px;
+              max-width: 100%;
+            }
+            
+            .mobile-form {
+              padding: 24px;
+            }
+          }
         `
       }} />
 
@@ -275,7 +286,7 @@ export default function ResetPasswordPage(): JSX.Element {
         }} />
       </div>
 
-      <div style={{ maxWidth: '500px', width: '100%', position: 'relative', zIndex: 10 }}>
+      <div className="mobile-container" style={{ maxWidth: '500px', width: '100%', position: 'relative', zIndex: 10 }}>
         {/* Header */}
         <div style={{ textAlign: 'center', marginBottom: '48px' }}>
           <div style={{ marginBottom: '32px' }}>
@@ -318,7 +329,7 @@ export default function ResetPasswordPage(): JSX.Element {
         </div>
 
         {/* Form Container */}
-        <div className="glassmorphism" style={{
+        <div className="glassmorphism mobile-form" style={{
           borderRadius: '24px', padding: '40px 32px', boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)'
         }}>
           {/* Security Badge */}
@@ -563,5 +574,43 @@ export default function ResetPasswordPage(): JSX.Element {
         </div>
       </div>
     </div>
+  );
+}
+
+function ResetPasswordFallback(): JSX.Element {
+  return (
+    <div style={{
+      minHeight: '100vh',
+      background: 'linear-gradient(135deg, #0f172a 0%, #1e3a8a 30%, #3730a3 60%, #1e1b4b 100%)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px'
+    }}>
+      <div style={{ textAlign: 'center', color: 'white' }}>
+        <div 
+          style={{
+            width: '40px', height: '40px',
+            border: '4px solid rgba(255, 255, 255, 0.3)',
+            borderTop: '4px solid white', borderRadius: '50%',
+            animation: 'spin 1s linear infinite', margin: '0 auto 16px'
+          }}
+        />
+        <p>Loading reset page...</p>
+      </div>
+      <style dangerouslySetInnerHTML={{
+        __html: `
+          @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+          }
+        `
+      }} />
+    </div>
+  );
+}
+
+export default function ResetPasswordPage(): JSX.Element {
+  return (
+    <Suspense fallback={<ResetPasswordFallback />}>
+      <ResetPasswordForm />
+    </Suspense>
   );
 }

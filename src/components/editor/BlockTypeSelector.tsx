@@ -4,14 +4,14 @@ import React, { useEffect, useRef, useState } from 'react';
 import { 
   FileText, Heading1, Heading2, Heading3, List, Hash, Quote, Code, 
   Image, Table, CheckSquare, Type, Minus, ChevronDown, ChevronRight,
-  Database, Grid3X3, BarChart3, TreePine, Layers
+  Database, Grid3X3, BarChart3, TreePine, Layers, X
 } from 'lucide-react';
 import { BlockType } from '@/types';
 
 interface BlockTypeSelectorProps {
   onSelect: (type: BlockType, options?: any) => void;
   onClose: () => void;
-  position?: { x: number; y: number };
+  position?: { x: number; y: number }; // Keep for backward compatibility but won't be used
 }
 
 const blockTypes = [
@@ -52,18 +52,18 @@ const blockTypes = [
   }
 ];
 
-export const BlockTypeSelector: React.FC<BlockTypeSelectorProps> = ({ 
+const BlockTypeSelector: React.FC<BlockTypeSelectorProps> = ({ 
   onSelect, 
   onClose, 
-  position 
+  position // Keep for backward compatibility but ignore
 }) => {
-  const containerRef = useRef<HTMLDivElement>(null);
+  const modalRef = useRef<HTMLDivElement>(null);
   const [showTableOptions, setShowTableOptions] = useState(false);
   const [showListOptions, setShowListOptions] = useState(false);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+      if (modalRef.current && !modalRef.current.contains(event.target as Node)) {
         onClose();
       }
     };
@@ -79,10 +79,14 @@ export const BlockTypeSelector: React.FC<BlockTypeSelectorProps> = ({
       }
     };
 
+    // Prevent body scroll when modal is open
+    document.body.style.overflow = 'hidden';
+    
     document.addEventListener('mousedown', handleClickOutside);
     document.addEventListener('keydown', handleEscape);
 
     return () => {
+      document.body.style.overflow = 'unset';
       document.removeEventListener('mousedown', handleClickOutside);
       document.removeEventListener('keydown', handleEscape);
     };
@@ -146,14 +150,22 @@ export const BlockTypeSelector: React.FC<BlockTypeSelectorProps> = ({
 
   const TableOptionsPanel = () => (
     <div className="space-y-4">
-      <div className="flex items-center space-x-2 mb-3">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center space-x-2">
+          <button 
+            onClick={() => setShowTableOptions(false)}
+            className="text-gray-400 hover:text-white"
+          >
+            <ChevronRight className="w-4 h-4 transform rotate-180" />
+          </button>
+          <span className="text-sm font-semibold text-white">Table Options</span>
+        </div>
         <button 
-          onClick={() => setShowTableOptions(false)}
-          className="text-gray-400 hover:text-white"
+          onClick={onClose}
+          className="text-gray-400 hover:text-white transition-colors"
         >
-          <ChevronRight className="w-4 h-4 transform rotate-180" />
+          <X className="w-4 h-4" />
         </button>
-        <span className="text-sm font-semibold text-white">Table Options</span>
       </div>
       
       {/* Quick Table Sizes */}
@@ -162,25 +174,25 @@ export const BlockTypeSelector: React.FC<BlockTypeSelectorProps> = ({
         <div className="grid grid-cols-2 gap-2">
           <button
             onClick={() => handleAdvancedTableSelect(2, 3, true)}
-            className="p-2 bg-gray-700 hover:bg-gray-600 rounded text-xs text-center"
+            className="p-2 bg-gray-700 hover:bg-gray-600 rounded text-xs text-center transition-colors"
           >
             2×3 Table
           </button>
           <button
             onClick={() => handleAdvancedTableSelect(3, 4, true)}
-            className="p-2 bg-gray-700 hover:bg-gray-600 rounded text-xs text-center"
+            className="p-2 bg-gray-700 hover:bg-gray-600 rounded text-xs text-center transition-colors"
           >
             3×4 Table
           </button>
           <button
             onClick={() => handleAdvancedTableSelect(4, 3, true)}
-            className="p-2 bg-gray-700 hover:bg-gray-600 rounded text-xs text-center"
+            className="p-2 bg-gray-700 hover:bg-gray-600 rounded text-xs text-center transition-colors"
           >
             4×3 Table
           </button>
           <button
             onClick={() => handleAdvancedTableSelect(5, 5, true)}
-            className="p-2 bg-gray-700 hover:bg-gray-600 rounded text-xs text-center"
+            className="p-2 bg-gray-700 hover:bg-gray-600 rounded text-xs text-center transition-colors"
           >
             5×5 Table
           </button>
@@ -216,14 +228,22 @@ export const BlockTypeSelector: React.FC<BlockTypeSelectorProps> = ({
 
   const ListOptionsPanel = () => (
     <div className="space-y-4">
-      <div className="flex items-center space-x-2 mb-3">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center space-x-2">
+          <button 
+            onClick={() => setShowListOptions(false)}
+            className="text-gray-400 hover:text-white"
+          >
+            <ChevronRight className="w-4 h-4 transform rotate-180" />
+          </button>
+          <span className="text-sm font-semibold text-white">List Options</span>
+        </div>
         <button 
-          onClick={() => setShowListOptions(false)}
-          className="text-gray-400 hover:text-white"
+          onClick={onClose}
+          className="text-gray-400 hover:text-white transition-colors"
         >
-          <ChevronRight className="w-4 h-4 transform rotate-180" />
+          <X className="w-4 h-4" />
         </button>
-        <span className="text-sm font-semibold text-white">List Options</span>
       </div>
       
       <div className="space-y-2">
@@ -285,147 +305,130 @@ export const BlockTypeSelector: React.FC<BlockTypeSelectorProps> = ({
     </div>
   );
 
-  if (showTableOptions) {
-    return (
-      <div 
-        ref={containerRef}
-        className="bg-gray-800 border border-gray-600 rounded-lg shadow-xl w-80 max-h-96 overflow-y-auto z-50"
-        style={position ? { 
-          position: 'absolute', 
-          left: position.x, 
-          top: position.y 
-        } : {}}
-      >
-        <div className="p-3">
-          <TableOptionsPanel />
-        </div>
+  const ModalContent = () => (
+    <div className="p-4">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-lg font-semibold text-white">Add a block</h3>
+        <button 
+          onClick={onClose}
+          className="text-gray-400 hover:text-white transition-colors p-1"
+        >
+          <X className="w-5 h-5" />
+        </button>
       </div>
-    );
-  }
-
-  if (showListOptions) {
-    return (
-      <div 
-        ref={containerRef}
-        className="bg-gray-800 border border-gray-600 rounded-lg shadow-xl w-80 max-h-96 overflow-y-auto z-50"
-        style={position ? { 
-          position: 'absolute', 
-          left: position.x, 
-          top: position.y 
-        } : {}}
-      >
-        <div className="p-3">
-          <ListOptionsPanel />
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div 
-      ref={containerRef}
-      className="bg-gray-800 border border-gray-600 rounded-lg shadow-xl w-80 max-h-96 overflow-y-auto z-50"
-      style={position ? { 
-        position: 'absolute', 
-        left: position.x, 
-        top: position.y 
-      } : {}}
-    >
-      <div className="p-3">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-semibold text-white">Add a block</h3>
-          <button 
-            onClick={onClose}
-            className="text-gray-400 hover:text-white transition-colors"
-          >
-            ×
-          </button>
-        </div>
-        
-        {blockTypes.map(({ category, items }) => (
-          <div key={category} className="mb-4">
-            <div className="text-xs text-gray-400 font-medium uppercase tracking-wider mb-2 px-2">
-              {category}
-            </div>
-            <div className="space-y-1">
-              {items.map(({ type, icon: Icon, label, description }) => {
-                
-                // Handle special cases with sub-menus
-                if (type === 'advanced_table' || type === 'dropdown_table' || type === 'table') {
-                  return (
-                    <button
-                      key={type}
-                      onClick={() => setShowTableOptions(true)}
-                      className="w-full flex items-center space-x-3 p-2 hover:bg-gray-700 rounded text-sm text-gray-300 hover:text-white transition-colors group"
-                    >
-                      <div className="flex-shrink-0">
-                        <Icon className="w-4 h-4" />
-                      </div>
-                      <div className="flex-1 text-left min-w-0">
-                        <div className="font-medium truncate">Tables</div>
-                        <div className="text-xs text-gray-500 truncate">Choose table type and size</div>
-                      </div>
-                      <ChevronRight className="w-3 h-3 opacity-100 transition-opacity" />
-                    </button>
-                  );
-                }
-
-                if (type === 'nested_list' || type === 'bullet' || type === 'numbered' || type === 'checklist') {
-                  return (
-                    <button
-                      key={type}
-                      onClick={() => setShowListOptions(true)}
-                      className="w-full flex items-center space-x-3 p-2 hover:bg-gray-700 rounded text-sm text-gray-300 hover:text-white transition-colors group"
-                    >
-                      <div className="flex-shrink-0">
-                        <Icon className="w-4 h-4" />
-                      </div>
-                      <div className="flex-1 text-left min-w-0">
-                        <div className="font-medium truncate">Lists & Tasks</div>
-                        <div className="text-xs text-gray-500 truncate">Choose list type and structure</div>
-                      </div>
-                      <ChevronRight className="w-3 h-3 opacity-100 transition-opacity" />
-                    </button>
-                  );
-                }
-
-                // Regular block types
+      
+      {blockTypes.map(({ category, items }) => (
+        <div key={category} className="mb-6">
+          <div className="text-xs text-gray-400 font-medium uppercase tracking-wider mb-3 px-2">
+            {category}
+          </div>
+          <div className="space-y-1">
+            {items.map(({ type, icon: Icon, label, description }) => {
+              
+              // Handle special cases with sub-menus
+              if (type === 'advanced_table' || type === 'dropdown_table' || type === 'table') {
                 return (
                   <button
                     key={type}
-                    onClick={() => handleSelect(type)}
-                    className="w-full flex items-center space-x-3 p-2 hover:bg-gray-700 rounded text-sm text-gray-300 hover:text-white transition-colors group"
+                    onClick={() => setShowTableOptions(true)}
+                    className="w-full flex items-center space-x-3 p-3 hover:bg-gray-700 rounded-lg text-sm text-gray-300 hover:text-white transition-colors group"
                   >
                     <div className="flex-shrink-0">
-                      <Icon className="w-4 h-4" />
+                      <Icon className="w-5 h-5" />
                     </div>
                     <div className="flex-1 text-left min-w-0">
-                      <div className="font-medium truncate">{label}</div>
-                      <div className="text-xs text-gray-500 truncate">{description}</div>
+                      <div className="font-medium truncate">Tables</div>
+                      <div className="text-xs text-gray-500 truncate">Choose table type and size</div>
                     </div>
-                    <ChevronRight className="w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity" />
+                    <ChevronRight className="w-4 h-4 opacity-70 group-hover:opacity-100 transition-opacity" />
                   </button>
                 );
-              })}
-            </div>
-          </div>
-        ))}
+              }
 
-        {/* Quick shortcuts hint */}
-        <div className="border-t border-gray-700 pt-2 mt-2">
-          <div className="text-xs text-gray-500 px-2">
-            <p className="mb-1"><strong>Tip:</strong> Type "/" for quick access</p>
-            <div className="flex flex-wrap gap-2 text-xs">
-              <span className="bg-gray-700 px-2 py-1 rounded">/table</span>
-              <span className="bg-gray-700 px-2 py-1 rounded">/list</span>
-              <span className="bg-gray-700 px-2 py-1 rounded">/todo</span>
-            </div>
+              if (type === 'nested_list' || type === 'bullet' || type === 'numbered' || type === 'checklist') {
+                return (
+                  <button
+                    key={type}
+                    onClick={() => setShowListOptions(true)}
+                    className="w-full flex items-center space-x-3 p-3 hover:bg-gray-700 rounded-lg text-sm text-gray-300 hover:text-white transition-colors group"
+                  >
+                    <div className="flex-shrink-0">
+                      <Icon className="w-5 h-5" />
+                    </div>
+                    <div className="flex-1 text-left min-w-0">
+                      <div className="font-medium truncate">Lists & Tasks</div>
+                      <div className="text-xs text-gray-500 truncate">Choose list type and structure</div>
+                    </div>
+                    <ChevronRight className="w-4 h-4 opacity-70 group-hover:opacity-100 transition-opacity" />
+                  </button>
+                );
+              }
+
+              // Regular block types
+              return (
+                <button
+                  key={type}
+                  onClick={() => handleSelect(type)}
+                  className="w-full flex items-center space-x-3 p-3 hover:bg-gray-700 rounded-lg text-sm text-gray-300 hover:text-white transition-colors group"
+                >
+                  <div className="flex-shrink-0">
+                    <Icon className="w-5 h-5" />
+                  </div>
+                  <div className="flex-1 text-left min-w-0">
+                    <div className="font-medium truncate">{label}</div>
+                    <div className="text-xs text-gray-500 truncate">{description}</div>
+                  </div>
+                  <ChevronRight className="w-4 h-4 opacity-0 group-hover:opacity-70 transition-opacity" />
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+
+      {/* Quick shortcuts hint */}
+      <div className="border-t border-gray-700 pt-4 mt-4">
+        <div className="text-xs text-gray-500 px-2">
+          <p className="mb-2 font-medium"><strong>Tip:</strong> Type "/" for quick access</p>
+          <div className="flex flex-wrap gap-2 text-xs">
+            <span className="bg-gray-700 px-2 py-1 rounded">/table</span>
+            <span className="bg-gray-700 px-2 py-1 rounded">/list</span>
+            <span className="bg-gray-700 px-2 py-1 rounded">/todo</span>
+            <span className="bg-gray-700 px-2 py-1 rounded">/code</span>
           </div>
         </div>
       </div>
     </div>
   );
+
+  return (
+    <>
+      {/* Modal Backdrop */}
+      <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        {/* Modal Container */}
+        <div 
+          ref={modalRef}
+          className="bg-gray-800 border border-gray-600 rounded-lg shadow-2xl w-full max-w-lg max-h-[80vh] overflow-y-auto"
+        >
+          {showTableOptions ? (
+            <div className="p-4">
+              <TableOptionsPanel />
+            </div>
+          ) : showListOptions ? (
+            <div className="p-4">
+              <ListOptionsPanel />
+            </div>
+          ) : (
+            <ModalContent />
+          )}
+        </div>
+      </div>
+    </>
+  );
 };
+
+// Named export
+export { BlockTypeSelector };
 
 // Add default export as well for flexibility
 export default BlockTypeSelector;

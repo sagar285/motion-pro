@@ -7,11 +7,11 @@ import { Sidebar } from '@/components/layout/Sidebar';
 import { PageViewer } from '@/components/workspace/PageViewer';
 import { mockWorkspaceData } from '@/lib/mockData';
 
-// Import the UserProfileModal component
-// import UserProfileModal from '@/components/modals/UserProfileModal';
+// Import notification components
+import NotificationBell from '@/components/notifications/NotificationBell';
+import NotificationSettings from '@/components/notifications/NotificationSettings';
 
-// For demo purposes, I'll include the UserProfileModal here
-// In your actual app, move this to a separate file
+// User interface
 interface User {
   id: string;
   name: string;
@@ -28,6 +28,7 @@ interface UserProfileModalProps {
   onUserUpdate?: (user: User) => void;
 }
 
+// Enhanced User Profile Modal with better error handling
 const UserProfileModal: React.FC<UserProfileModalProps> = ({ isOpen, onClose, onUserUpdate }) => {
   const [user, setUser] = useState<User | null>(null);
   const [isEditing, setIsEditing] = useState(false);
@@ -44,6 +45,17 @@ const UserProfileModal: React.FC<UserProfileModalProps> = ({ isOpen, onClose, on
     confirmPassword: ''
   });
 
+  // Auto-clear messages after 5 seconds
+  useEffect(() => {
+    if (error || success) {
+      const timer = setTimeout(() => {
+        setError(null);
+        setSuccess(null);
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [error, success]);
+
   useEffect(() => {
     if (isOpen) {
       fetchUserProfile();
@@ -56,9 +68,7 @@ const UserProfileModal: React.FC<UserProfileModalProps> = ({ isOpen, onClose, on
     
     try {
       const response = await fetch('/api/user/profile', {
-        headers: {
-          'x-user-id': '1'
-        }
+        credentials: 'include'
       });
       
       if (response.ok) {
@@ -72,11 +82,16 @@ const UserProfileModal: React.FC<UserProfileModalProps> = ({ isOpen, onClose, on
           newPassword: '',
           confirmPassword: ''
         });
+      } else if (response.status === 401) {
+        setError('Session expired. Please log in again.');
+        setTimeout(() => {
+          window.location.href = '/login';
+        }, 2000);
       } else {
         setError('Failed to load user profile');
       }
     } catch (err) {
-      setError('Error loading profile');
+      setError('Network error. Please check your connection.');
       console.error('Profile fetch error:', err);
     } finally {
       setIsLoading(false);
@@ -88,6 +103,7 @@ const UserProfileModal: React.FC<UserProfileModalProps> = ({ isOpen, onClose, on
     setSuccess(null);
     setIsLoading(true);
 
+    // Validation
     if (!formData.name.trim()) {
       setError('Name is required');
       setIsLoading(false);
@@ -112,6 +128,12 @@ const UserProfileModal: React.FC<UserProfileModalProps> = ({ isOpen, onClose, on
       return;
     }
 
+    if (formData.newPassword && formData.newPassword.length < 6) {
+      setError('New password must be at least 6 characters long');
+      setIsLoading(false);
+      return;
+    }
+
     try {
       const updateData: any = {
         name: formData.name.trim(),
@@ -128,8 +150,8 @@ const UserProfileModal: React.FC<UserProfileModalProps> = ({ isOpen, onClose, on
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-id': '1'
         },
+        credentials: 'include',
         body: JSON.stringify(updateData)
       });
 
@@ -150,11 +172,16 @@ const UserProfileModal: React.FC<UserProfileModalProps> = ({ isOpen, onClose, on
         if (onUserUpdate) {
           onUserUpdate(result.user);
         }
+      } else if (response.status === 401) {
+        setError('Session expired. Please log in again.');
+        setTimeout(() => {
+          window.location.href = '/login';
+        }, 2000);
       } else {
         setError(result.error || 'Failed to update profile');
       }
     } catch (err) {
-      setError('Error updating profile');
+      setError('Network error. Please try again.');
       console.error('Profile update error:', err);
     } finally {
       setIsLoading(false);
@@ -177,6 +204,17 @@ const UserProfileModal: React.FC<UserProfileModalProps> = ({ isOpen, onClose, on
     setSuccess(null);
   };
 
+  const handleClose = () => {
+    if (isEditing) {
+      if (window.confirm('You have unsaved changes. Are you sure you want to close?')) {
+        handleCancel();
+        onClose();
+      }
+    } else {
+      onClose();
+    }
+  };
+
   if (!isOpen) return null;
 
   return (
@@ -187,8 +225,9 @@ const UserProfileModal: React.FC<UserProfileModalProps> = ({ isOpen, onClose, on
             {isEditing ? 'Edit Profile' : 'User Profile'}
           </h2>
           <button
-            onClick={onClose}
+            onClick={handleClose}
             className="text-gray-400 hover:text-white transition-colors"
+            aria-label="Close profile"
           >
             <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -200,6 +239,7 @@ const UserProfileModal: React.FC<UserProfileModalProps> = ({ isOpen, onClose, on
           {isLoading && !user ? (
             <div className="flex items-center justify-center py-8">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+              <p className="text-gray-400 ml-3">Loading profile...</p>
             </div>
           ) : (
             <div>
@@ -212,13 +252,13 @@ const UserProfileModal: React.FC<UserProfileModalProps> = ({ isOpen, onClose, on
               </div>
 
               {error && (
-                <div className="mb-4 p-3 bg-red-900/50 border border-red-700 rounded-lg text-red-200 text-sm">
+                <div className="mb-4 p-3 bg-red-900/50 border border-red-700 rounded-lg text-red-200 text-sm" role="alert">
                   {error}
                 </div>
               )}
               
               {success && (
-                <div className="mb-4 p-3 bg-green-900/50 border border-green-700 rounded-lg text-green-200 text-sm">
+                <div className="mb-4 p-3 bg-green-900/50 border border-green-700 rounded-lg text-green-200 text-sm" role="alert">
                   {success}
                 </div>
               )}
@@ -286,7 +326,7 @@ const UserProfileModal: React.FC<UserProfileModalProps> = ({ isOpen, onClose, on
                           value={formData.newPassword}
                           onChange={(e) => setFormData(prev => ({ ...prev, newPassword: e.target.value }))}
                           className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                          placeholder="Enter new password"
+                          placeholder="Enter new password (min 6 characters)"
                         />
                       </div>
 
@@ -335,7 +375,7 @@ const UserProfileModal: React.FC<UserProfileModalProps> = ({ isOpen, onClose, on
                 {!isEditing ? (
                   <>
                     <button
-                      onClick={onClose}
+                      onClick={handleClose}
                       className="px-4 py-2 text-gray-300 hover:text-white transition-colors"
                     >
                       Close
@@ -378,12 +418,6 @@ const UserProfileModal: React.FC<UserProfileModalProps> = ({ isOpen, onClose, on
 };
 
 // Helper Icons
-const BellIcon = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-gray-400 group-hover:text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6 6 0 10-12 0v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
-  </svg>
-);
-
 const UserCircleIcon = () => (
   <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 rounded-full text-gray-500" fill="currentColor" viewBox="0 0 20 20">
     <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-6-3a2 2 0 11-4 0 2 2 0 014 0zm-2 4a5 5 0 00-4.546 2.916A5.986 5.986 0 0010 16a5.986 5.986 0 004.546-2.084A5 5 0 0012 11z" clipRule="evenodd" />
@@ -409,29 +443,64 @@ const UserIcon = () => (
   </svg>
 );
 
-// Updated UserProfile Component
+const BellIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-3 text-gray-400 group-hover:text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6 6 0 10-12 0v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+  </svg>
+);
+
+// Enhanced UserProfile Component
 const UserProfile: React.FC = () => {
   const [isOpen, setIsOpen] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+  const [isNotificationSettingsOpen, setIsNotificationSettingsOpen] = useState(false);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [notifications, setNotifications] = useState({ success: '', error: '' });
   const dropdownRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
+
+  // Fetch current user on component mount
+  useEffect(() => {
+    const fetchUser = async () => {
+      try {
+        const response = await fetch('/api/auth/me', { credentials: 'include' });
+        if (response.ok) {
+          const data = await response.json();
+          setCurrentUser(data.user);
+        }
+      } catch (error) {
+        console.error('Error fetching user:', error);
+      }
+    };
+    fetchUser();
+  }, []);
+
+  // Auto-clear notifications
+  useEffect(() => {
+    if (notifications.success || notifications.error) {
+      const timer = setTimeout(() => {
+        setNotifications({ success: '', error: '' });
+      }, 4000);
+      return () => clearTimeout(timer);
+    }
+  }, [notifications]);
 
   const handleLogout = async () => {
     try {
       const response = await fetch('/api/auth/logout', {
         method: 'POST',
+        credentials: 'include'
       });
 
       if (response.ok) {
-        console.log('Logout successful');
         router.push('/login');
       } else {
         const data = await response.json();
-        console.error('Logout failed:', data.error || 'An unknown error occurred.');
+        setNotifications({ success: '', error: data.error || 'Logout failed' });
       }
     } catch (error) {
-      console.error('An error occurred during logout:', error);
+      setNotifications({ success: '', error: 'Network error during logout' });
+      console.error('Logout error:', error);
     } finally {
       setIsOpen(false);
     }
@@ -442,8 +511,22 @@ const UserProfile: React.FC = () => {
     setIsProfileModalOpen(true);
   };
 
+  const handleNotificationSettings = () => {
+    setIsOpen(false);
+    setIsNotificationSettingsOpen(true);
+  };
+
   const handleUserUpdate = (updatedUser: User) => {
     setCurrentUser(updatedUser);
+    setNotifications({ success: 'Profile updated successfully', error: '' });
+  };
+
+  const handleNotificationError = (error: string) => {
+    setNotifications({ success: '', error });
+  };
+
+  const handleNotificationSuccess = (message: string) => {
+    setNotifications({ success: message, error: '' });
   };
 
   useEffect(() => {
@@ -462,6 +545,7 @@ const UserProfile: React.FC = () => {
         <button 
           onClick={() => setIsOpen(!isOpen)} 
           className="focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-900 focus:ring-blue-500 rounded-full"
+          aria-label="User menu"
         >
           <UserCircleIcon />
         </button>
@@ -471,21 +555,28 @@ const UserProfile: React.FC = () => {
             <div className="px-4 py-3 border-b border-gray-700">
               <p className="text-sm text-gray-400">Signed in as</p>
               <p className="text-sm font-medium text-white truncate">
-                {currentUser?.email || 'user@motion-pro.com'}
+                {currentUser?.email || 'Loading...'}
               </p>
             </div>
             
             <div className="py-1">
               <button 
                 onClick={handleViewProfile}
-                className="group flex items-center w-full px-4 py-2 text-sm text-left text-gray-300 hover:bg-gray-700 hover:text-white"
+                className="group flex items-center w-full px-4 py-2 text-sm text-left text-gray-300 hover:bg-gray-700 hover:text-white transition-colors"
               >
                 <UserIcon />
                 View Profile
               </button>
               <button 
+                onClick={handleNotificationSettings}
+                className="group flex items-center w-full px-4 py-2 text-sm text-left text-gray-300 hover:bg-gray-700 hover:text-white transition-colors"
+              >
+                <BellIcon />
+                Notification Settings
+              </button>
+              <button 
                 onClick={handleViewProfile}
-                className="group flex items-center w-full px-4 py-2 text-sm text-left text-gray-300 hover:bg-gray-700 hover:text-white"
+                className="group flex items-center w-full px-4 py-2 text-sm text-left text-gray-300 hover:bg-gray-700 hover:text-white transition-colors"
               >
                 <SettingsIcon />
                 Account Settings
@@ -495,7 +586,7 @@ const UserProfile: React.FC = () => {
             <div className="py-1 border-t border-gray-700">
               <button 
                 onClick={handleLogout} 
-                className="group flex items-center w-full px-4 py-2 text-sm text-left text-gray-300 hover:bg-red-600/50 hover:text-white"
+                className="group flex items-center w-full px-4 py-2 text-sm text-left text-gray-300 hover:bg-red-600/50 hover:text-white transition-colors"
               >
                 <LogoutIcon />
                 Logout
@@ -505,38 +596,92 @@ const UserProfile: React.FC = () => {
         )}
       </div>
 
-      {/* User Profile Modal */}
+      {/* Modals */}
       <UserProfileModal
         isOpen={isProfileModalOpen}
         onClose={() => setIsProfileModalOpen(false)}
         onUserUpdate={handleUserUpdate}
       />
+
+      <NotificationSettings
+        isOpen={isNotificationSettingsOpen}
+        onClose={() => setIsNotificationSettingsOpen(false)}
+        onError={handleNotificationError}
+        onSuccess={handleNotificationSuccess}
+      />
     </>
   );
 };
 
-// Notifications Component
-const Notifications: React.FC = () => {
+// Global notification toast component
+const NotificationToast: React.FC<{ notifications: { success: string; error: string } }> = ({ notifications }) => {
+  if (!notifications.success && !notifications.error) return null;
+
   return (
-    <button className="relative p-2 rounded-full group focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-900 focus:ring-blue-500">
-      <BellIcon />
-      <span className="absolute top-2 right-2 block h-2 w-2 rounded-full bg-blue-500 ring-2 ring-gray-900"></span>
-    </button>
+    <div className="fixed top-4 right-4 z-50 max-w-sm">
+      {notifications.success && (
+        <div className="bg-green-900/90 border border-green-700 rounded-lg p-4 text-green-200 shadow-lg backdrop-blur-sm">
+          <div className="flex items-center">
+            <svg className="w-5 h-5 mr-2 text-green-400" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+            </svg>
+            <span className="text-sm">{notifications.success}</span>
+          </div>
+        </div>
+      )}
+      
+      {notifications.error && (
+        <div className="bg-red-900/90 border border-red-700 rounded-lg p-4 text-red-200 shadow-lg backdrop-blur-sm">
+          <div className="flex items-center">
+            <svg className="w-5 h-5 mr-2 text-red-400" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+            </svg>
+            <span className="text-sm">{notifications.error}</span>
+          </div>
+        </div>
+      )}
+    </div>
   );
 };
 
-// Header Component
+// Enhanced Header Component with notification system
 const Header: React.FC = () => {
+  const [globalNotifications, setGlobalNotifications] = useState({ success: '', error: '' });
+
+  const handleNotificationError = (error: string) => {
+    setGlobalNotifications({ success: '', error });
+  };
+
+  const handleNotificationSuccess = (message: string) => {
+    setGlobalNotifications({ success: message, error: '' });
+  };
+
+  // Auto-clear notifications
+  useEffect(() => {
+    if (globalNotifications.success || globalNotifications.error) {
+      const timer = setTimeout(() => {
+        setGlobalNotifications({ success: '', error: '' });
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [globalNotifications]);
+
   return (
-    <header className="flex-shrink-0 bg-gray-900 border-b border-gray-700/50">
-      <div className="flex items-center justify-between p-2 h-16">
-        <div className="text-gray-500"></div>
-        <div className="flex items-center space-x-3 mr-2">
-          <Notifications />
-          <UserProfile />
+    <>
+      <header className="flex-shrink-0 bg-gray-900 border-b border-gray-700/50">
+        <div className="flex items-center justify-between p-2 h-16">
+          <div className="text-gray-500"></div>
+          <div className="flex items-center space-x-3 mr-2">
+            <NotificationBell 
+              onError={handleNotificationError}
+            />
+            <UserProfile />
+          </div>
         </div>
-      </div>
-    </header>
+      </header>
+      
+      <NotificationToast notifications={globalNotifications} />
+    </>
   );
 };
 
@@ -586,6 +731,7 @@ const DashboardContent: React.FC = () => {
                   <p>💡 Tip: Click the + button next to any section to add pages</p>
                   <p>⚡ Use "/" in any text block for quick formatting</p>
                   <p>💬 Comments are available on every page</p>
+                  <p>🔔 Check the notification bell for workspace updates</p>
                 </div>
               </div>
             </div>

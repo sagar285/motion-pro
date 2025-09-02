@@ -19,7 +19,6 @@ const dbConfig: DatabaseConfig = {
   port: parseInt(process.env.DB_PORT || '3306'),
 };
 
-
 export async function getConnection(): Promise<mysql.Connection> {
   if (!connection) {
     try {
@@ -31,6 +30,97 @@ export async function getConnection(): Promise<mysql.Connection> {
     }
   }
   return connection;
+}
+
+// Create notification-related tables
+export async function createNotificationTables(): Promise<void> {
+  const db = await getConnection();
+
+  // Create notifications table
+  const createNotificationsTable = `
+    CREATE TABLE IF NOT EXISTS notifications (
+      id VARCHAR(36) PRIMARY KEY,
+      user_id INT NOT NULL,
+      workspace_id VARCHAR(36),
+      type ENUM(
+        'workspace_created',
+        'workspace_updated', 
+        'workspace_deleted',
+        'page_created',
+        'page_updated',
+        'page_deleted',
+        'section_created',
+        'section_updated',
+        'section_deleted',
+        'member_added',
+        'member_removed',
+        'comment_added',
+        'assignment_changed'
+      ) NOT NULL,
+      title VARCHAR(255) NOT NULL,
+      message TEXT NOT NULL,
+      metadata JSON,
+      is_read BOOLEAN DEFAULT FALSE,
+      is_email_sent BOOLEAN DEFAULT FALSE,
+      created_by INT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      read_at TIMESTAMP NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+      FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+      INDEX idx_user_id (user_id),
+      INDEX idx_workspace_id (workspace_id),
+      INDEX idx_type (type),
+      INDEX idx_is_read (is_read),
+      INDEX idx_created_at (created_at)
+    )
+  `;
+  
+  await db.execute(createNotificationsTable);
+  console.log('✅ Notifications table created or already exists');
+
+  // Create notification preferences table
+  const createNotificationPreferencesTable = `
+    CREATE TABLE IF NOT EXISTS notification_preferences (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL UNIQUE,
+      email_notifications BOOLEAN DEFAULT TRUE,
+      workspace_changes BOOLEAN DEFAULT TRUE,
+      page_changes BOOLEAN DEFAULT TRUE,
+      comments BOOLEAN DEFAULT TRUE,
+      assignments BOOLEAN DEFAULT TRUE,
+      daily_digest BOOLEAN DEFAULT FALSE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      INDEX idx_user_id (user_id)
+    )
+  `;
+  
+  await db.execute(createNotificationPreferencesTable);
+  console.log('✅ Notification preferences table created or already exists');
+
+  // Create notification batches table
+  const createNotificationBatchesTable = `
+    CREATE TABLE IF NOT EXISTS notification_batches (
+      id VARCHAR(36) PRIMARY KEY,
+      workspace_id VARCHAR(36),
+      batch_type ENUM('immediate', 'daily_digest', 'weekly_summary') DEFAULT 'immediate',
+      status ENUM('pending', 'processing', 'completed', 'failed') DEFAULT 'pending',
+      total_notifications INT DEFAULT 0,
+      processed_notifications INT DEFAULT 0,
+      error_message TEXT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      processed_at TIMESTAMP NULL,
+      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+      INDEX idx_workspace_id (workspace_id),
+      INDEX idx_status (status),
+      INDEX idx_created_at (created_at)
+    )
+  `;
+  
+  await db.execute(createNotificationBatchesTable);
+  console.log('✅ Notification batches table created or already exists');
 }
 
 // Migration function to add missing columns to existing tables
@@ -140,6 +230,70 @@ export async function migrateExistingTables(): Promise<void> {
   }
 }
 
+// NEW: Migration function specifically for notification system
+export async function migrateNotificationSystem(): Promise<void> {
+  const db = await getConnection();
+  
+  try {
+    console.log('🔄 Checking for notification system migrations...');
+    
+    // Check if notifications table exists
+    const [notificationTables] = await db.execute(`
+      SELECT TABLE_NAME 
+      FROM INFORMATION_SCHEMA.TABLES 
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'notifications'
+    `, [dbConfig.database]) as any[];
+    
+    if (notificationTables.length === 0) {
+      console.log('➕ Creating notification system tables...');
+      await createNotificationTables();
+      console.log('✅ Notification system tables created successfully');
+    } else {
+      console.log('✅ Notification system tables already exist');
+      
+      // Check if we need to migrate existing notification table structure
+      const [notificationColumns] = await db.execute(`
+        SELECT COLUMN_NAME 
+        FROM INFORMATION_SCHEMA.COLUMNS 
+        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'notifications'
+      `, [dbConfig.database]) as any[];
+      
+      const existingColumns = notificationColumns.map((col: any) => col.COLUMN_NAME);
+      const requiredColumns = ['id', 'user_id', 'workspace_id', 'type', 'title', 'message', 'metadata', 'is_read', 'is_email_sent', 'created_by', 'created_at', 'read_at'];
+      
+      for (const column of requiredColumns) {
+        if (!existingColumns.includes(column)) {
+          console.log(`➕ Adding missing column: ${column}`);
+          // Add column based on type
+          switch (column) {
+            case 'workspace_id':
+              await db.execute(`ALTER TABLE notifications ADD COLUMN workspace_id VARCHAR(36) AFTER user_id`);
+              break;
+            case 'metadata':
+              await db.execute(`ALTER TABLE notifications ADD COLUMN metadata JSON AFTER message`);
+              break;
+            case 'is_email_sent':
+              await db.execute(`ALTER TABLE notifications ADD COLUMN is_email_sent BOOLEAN DEFAULT FALSE AFTER is_read`);
+              break;
+            case 'created_by':
+              await db.execute(`ALTER TABLE notifications ADD COLUMN created_by INT AFTER is_email_sent`);
+              break;
+            case 'read_at':
+              await db.execute(`ALTER TABLE notifications ADD COLUMN read_at TIMESTAMP NULL AFTER created_at`);
+              break;
+          }
+        }
+      }
+    }
+    
+    console.log('🎉 Notification system migration completed successfully');
+    
+  } catch (error) {
+    console.error('❌ Notification system migration failed:', error);
+    throw error;
+  }
+}
+
 // Auto-setup database and tables
 export async function setupDatabase(): Promise<mysql.Connection> {
   let tempConnection: mysql.Connection | null = null;
@@ -162,6 +316,7 @@ export async function setupDatabase(): Promise<mysql.Connection> {
     // Create all required tables
     await createAuthTables();
     await createWorkspaceTables();
+    await createNotificationTables(); // Add this line
     await ensureDefaultWorkspace();
     
     console.log('✅ All tables created and default workspace ensured');
@@ -367,21 +522,47 @@ async function createWorkspaceTables(): Promise<void> {
   await db.execute(createPagesTable);
   console.log('✅ Pages table created or already exists');
 
-  // Create content blocks table
+  // Enhanced content blocks table with more block types
   const createContentBlocksTable = `
     CREATE TABLE IF NOT EXISTS content_blocks (
       id VARCHAR(36) PRIMARY KEY,
       page_id VARCHAR(36) NOT NULL,
-      type ENUM('text', 'heading1', 'heading2', 'heading3', 'bullet', 'numbered', 'quote', 'code', 'divider', 'image', 'table', 'checklist') NOT NULL,
+      type ENUM(
+        'text', 
+        'heading1', 
+        'heading2', 
+        'heading3', 
+        'bullet', 
+        'numbered', 
+        'quote', 
+        'code', 
+        'divider', 
+        'image', 
+        'table', 
+        'checklist',
+        'advanced_table',
+        'nested_list',
+        'dropdown_list',
+        'dropdown_table',
+        'file_attachment',
+        'embed',
+        'callout',
+        'toggle',
+        'column_layout',
+        'database_view'
+      ) NOT NULL,
       content TEXT NOT NULL DEFAULT '',
       metadata JSON,
       block_order INT NOT NULL DEFAULT 0,
+      parent_block_id VARCHAR(36), -- For nested blocks like toggles
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE,
+      FOREIGN KEY (parent_block_id) REFERENCES content_blocks(id) ON DELETE CASCADE,
       INDEX idx_page_id (page_id),
       INDEX idx_order (block_order),
-      INDEX idx_type (type)
+      INDEX idx_type (type),
+      INDEX idx_parent_block (parent_block_id)
     )
   `;
   
@@ -431,6 +612,31 @@ async function createWorkspaceTables(): Promise<void> {
   
   await db.execute(createPageFilesTable);
   console.log('✅ Page files table created or already exists');
+
+  // Create block_files table for file attachments within blocks
+  const createBlockFilesTable = `
+    CREATE TABLE IF NOT EXISTS block_files (
+      id VARCHAR(36) PRIMARY KEY,
+      block_id VARCHAR(36) NOT NULL,
+      original_name VARCHAR(255) NOT NULL,
+      stored_name VARCHAR(255) NOT NULL,
+      file_size BIGINT NOT NULL,
+      mime_type VARCHAR(100) NOT NULL,
+      file_path TEXT NOT NULL,
+      thumbnail_path TEXT,
+      uploaded_by VARCHAR(36),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (block_id) REFERENCES content_blocks(id) ON DELETE CASCADE,
+      FOREIGN KEY (uploaded_by) REFERENCES workspace_members(id) ON DELETE SET NULL,
+      INDEX idx_block_id (block_id),
+      INDEX idx_mime_type (mime_type),
+      INDEX idx_uploaded_by (uploaded_by)
+    )
+  `;
+  
+  await db.execute(createBlockFilesTable);
+  console.log('✅ Block files table created or already exists');
 }
 
 // Ensure default workspace exists
@@ -559,141 +765,6 @@ export async function ensureDefaultWorkspace(): Promise<void> {
   }
 }
 
-// Utility function to generate UUID (for MySQL compatibility)
-function generateUUID(): string {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-    const r = Math.random() * 16 | 0;
-    const v = c === 'x' ? r : (r & 0x3 | 0x8);
-    return v.toString(16);
-  });
-}
-
-// Connection pool management
-export async function closeConnection(): Promise<void> {
-  if (connection) {
-    try {
-      await connection.end();
-      connection = null;
-      console.log('Database connection closed');
-    } catch (error) {
-      console.error('Error closing database connection:', error);
-    }
-  }
-}
-
-// Health check function
-export async function checkDatabaseHealth(): Promise<boolean> {
-  try {
-    const db = await getConnection();
-    await db.execute('SELECT 1');
-    return true;
-  } catch (error) {
-    console.error('Database health check failed:', error);
-    return false;
-  }
-}
-
-// Initialize database on startup
-export async function initializeDatabase(): Promise<void> {
-  try {
-    console.log('🚀 Initializing Motion-Pro database...');
-    await setupDatabase();
-    await migrateExistingTables(); // Run migration after setup
-    console.log('✅ Database initialized successfully');
-  } catch (error) {
-    console.error('❌ Database initialization failed:', error);
-    if (process.env.NODE_ENV === 'development') {
-      throw error;
-    }
-  }
-}
-
-// Cleanup expired records
-export async function cleanupExpiredRecords(): Promise<void> {
-  const db = await getConnection();
-  
-  try {
-    const [otpResult] = await db.execute('DELETE FROM otps WHERE expires_at < NOW()') as any[];
-    const [sessionResult] = await db.execute('DELETE FROM sessions WHERE expires_at < NOW()') as any[];
-    
-    console.log(`✅ Cleaned up ${otpResult.affectedRows} expired OTPs and ${sessionResult.affectedRows} expired sessions`);
-  } catch (error) {
-    console.error('❌ Cleanup failed:', error);
-  }
-
-    // Enhanced content blocks table with more block types
-  const createContentBlocksTable = `
-    CREATE TABLE IF NOT EXISTS content_blocks (
-      id VARCHAR(36) PRIMARY KEY,
-      page_id VARCHAR(36) NOT NULL,
-      type ENUM(
-        'text', 
-        'heading1', 
-        'heading2', 
-        'heading3', 
-        'bullet', 
-        'numbered', 
-        'quote', 
-        'code', 
-        'divider', 
-        'image', 
-        'table', 
-        'checklist',
-        'advanced_table',
-        'nested_list',
-        'dropdown_list',
-        'dropdown_table',
-        'file_attachment',
-        'embed',
-        'callout',
-        'toggle',
-        'column_layout',
-        'database_view'
-      ) NOT NULL,
-      content TEXT NOT NULL DEFAULT '',
-      metadata JSON,
-      block_order INT NOT NULL DEFAULT 0,
-      parent_block_id VARCHAR(36), -- For nested blocks like toggles
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE,
-      FOREIGN KEY (parent_block_id) REFERENCES content_blocks(id) ON DELETE CASCADE,
-      INDEX idx_page_id (page_id),
-      INDEX idx_order (block_order),
-      INDEX idx_type (type),
-      INDEX idx_parent_block (parent_block_id)
-    )
-  `;
-  
-  await db.execute(createContentBlocksTable);
-  console.log('✅ Enhanced content blocks table created');
-
-  // Create block_files table for file attachments within blocks
-  const createBlockFilesTable = `
-    CREATE TABLE IF NOT EXISTS block_files (
-      id VARCHAR(36) PRIMARY KEY,
-      block_id VARCHAR(36) NOT NULL,
-      original_name VARCHAR(255) NOT NULL,
-      stored_name VARCHAR(255) NOT NULL,
-      file_size BIGINT NOT NULL,
-      mime_type VARCHAR(100) NOT NULL,
-      file_path TEXT NOT NULL,
-      thumbnail_path TEXT,
-      uploaded_by VARCHAR(36),
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      FOREIGN KEY (block_id) REFERENCES content_blocks(id) ON DELETE CASCADE,
-      FOREIGN KEY (uploaded_by) REFERENCES workspace_members(id) ON DELETE SET NULL,
-      INDEX idx_block_id (block_id),
-      INDEX idx_mime_type (mime_type),
-      INDEX idx_uploaded_by (uploaded_by)
-    )
-  `;
-  
-  await db.execute(createBlockFilesTable);
-  console.log('✅ Block files table created');
-}
-
 // Migration for existing databases
 export async function migrateContentBlocksTable(): Promise<void> {
   const db = await getConnection();
@@ -791,6 +862,96 @@ export async function migrateContentBlocksTable(): Promise<void> {
   }
 }
 
+// Test notification function
+export async function testNotificationSystem(): Promise<void> {
+  try {
+    console.log('🧪 Testing notification system...');
+    
+    // Import notification functions
+    const { createNotification } = await import('./notifications');
+    
+    // Create a test notification
+    const success = await createNotification({
+      type: 'workspace_updated',
+      title: 'Test Notification',
+      message: 'This is a test notification to verify the system is working',
+      workspace_id: 'default-workspace',
+      metadata: { test: true }
+    });
+    
+    if (success) {
+      console.log('✅ Notification system test passed');
+    } else {
+      console.log('❌ Notification system test failed');
+    }
+  } catch (error) {
+    console.error('❌ Notification system test error:', error);
+  }
+}
+
+// Utility function to generate UUID (for MySQL compatibility)
+function generateUUID(): string {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    const r = Math.random() * 16 | 0;
+    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+}
+
+// Connection pool management
+export async function closeConnection(): Promise<void> {
+  if (connection) {
+    try {
+      await connection.end();
+      connection = null;
+      console.log('Database connection closed');
+    } catch (error) {
+      console.error('Error closing database connection:', error);
+    }
+  }
+}
+
+// Health check function
+export async function checkDatabaseHealth(): Promise<boolean> {
+  try {
+    const db = await getConnection();
+    await db.execute('SELECT 1');
+    return true;
+  } catch (error) {
+    console.error('Database health check failed:', error);
+    return false;
+  }
+}
+
+// Initialize database on startup
+export async function initializeDatabase(): Promise<void> {
+  try {
+    console.log('🚀 Initializing Motion-Pro database...');
+    await setupDatabase();
+    await migrateExistingTables(); // Run migration after setup
+    await migrateNotificationSystem(); // Add this line to initialize notifications
+    console.log('✅ Database initialized successfully');
+  } catch (error) {
+    console.error('❌ Database initialization failed:', error);
+    if (process.env.NODE_ENV === 'development') {
+      throw error;
+    }
+  }
+}
+
+// Cleanup expired records
+export async function cleanupExpiredRecords(): Promise<void> {
+  const db = await getConnection();
+  
+  try {
+    const [otpResult] = await db.execute('DELETE FROM otps WHERE expires_at < NOW()') as any[];
+    const [sessionResult] = await db.execute('DELETE FROM sessions WHERE expires_at < NOW()') as any[];
+    
+    console.log(`✅ Cleaned up ${otpResult.affectedRows} expired OTPs and ${sessionResult.affectedRows} expired sessions`);
+  } catch (error) {
+    console.error('❌ Cleanup failed:', error);
+  }
+}
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
@@ -809,7 +970,3 @@ process.on('SIGTERM', async () => {
 if (process.env.NODE_ENV === 'development') {
   initializeDatabase();
 }
-
-
-  // ... existing tables ...
-

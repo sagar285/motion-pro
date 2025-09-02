@@ -1,157 +1,139 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { getConnection } from '@/lib/database';
+import { RowDataPacket, ResultSetHeader } from 'mysql2';
 
-// app/api/workspaces/route.ts
-import { NextRequest, NextResponse } from "next/server";
-import { getConnection, setupDatabase, ensureDefaultWorkspace } from "@/lib/database";
-import type { RowDataPacket, ResultSetHeader } from "mysql2";
-
-// -------- Utils --------
+// Utility function to generate UUID
 function generateUUID(): string {
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === "x" ? r : (r & 0x3) | 0x8;
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    const r = Math.random() * 16 | 0;
+    const v = c === 'x' ? r : (r & 0x3 | 0x8);
     return v.toString(16);
   });
 }
 
-function safeParseJSON<T>(val: any, fallback: T): T {
-  try {
-    if (val == null) return fallback;
-    if (typeof val === "string") return JSON.parse(val) as T;
-    return (val as T) ?? fallback;
-  } catch {
-    return fallback;
-  }
-}
-debugger
-
-// Build full nested workspace payload
+// Helper function to build complete workspace data structure
 async function buildWorkspaceData(db: any, workspaceId: string) {
-  // Workspace
-  const [wsRows] = (await db.execute(
-    "SELECT * FROM workspaces WHERE id = ?",
+  // Get workspace basic info
+  const [workspaceRows] = await db.execute(
+    'SELECT * FROM workspaces WHERE id = ?',
     [workspaceId]
-  )) as [RowDataPacket[], any];
+  ) as [RowDataPacket[], any];
 
-  if (wsRows.length === 0) return null;
-  const workspace = wsRows[0];
+  if (workspaceRows.length === 0) {
+    return null;
+  }
 
-  // Members
-  const [memberRows] = (await db.execute(
-    `SELECT id, name, email, avatar, role, created_at, updated_at
-     FROM workspace_members
-     WHERE workspace_id = ?
-     ORDER BY created_at`,
+  const workspace = workspaceRows[0];
+
+  // Get workspace members
+  const [memberRows] = await db.execute(
+    'SELECT id, name, email, avatar, role, created_at, updated_at FROM workspace_members WHERE workspace_id = ? ORDER BY created_at',
     [workspaceId]
-  )) as [RowDataPacket[], any];
+  ) as [RowDataPacket[], any];
 
-  // Sections
-  const [sectionRows] = (await db.execute(
-    `SELECT * FROM sections
-     WHERE workspace_id = ?
-     ORDER BY section_order ASC`,
+  // Get all sections for this workspace
+  const [sectionRows] = await db.execute(
+    'SELECT * FROM sections WHERE workspace_id = ? ORDER BY section_order ASC',
     [workspaceId]
-  )) as [RowDataPacket[], any];
+  ) as [RowDataPacket[], any];
 
-  const sections: any[] = [];
+  const sections = [];
 
   for (const section of sectionRows) {
-    // Subsections for this section
-    const [subsectionRows] = (await db.execute(
-      `SELECT * FROM subsections
-       WHERE section_id = ?
-       ORDER BY subsection_order ASC`,
+    // Get subsections for this section
+    const [subsectionRows] = await db.execute(
+      'SELECT * FROM subsections WHERE section_id = ? ORDER BY subsection_order ASC',
       [section.id]
-    )) as [RowDataPacket[], any];
+    ) as [RowDataPacket[], any];
 
-    const subsections: any[] = [];
+    const subsections = [];
 
+    // Process each subsection
     for (const subsection of subsectionRows) {
-      // Pages in this subsection
-      const [subPages] = (await db.execute(
-        `SELECT * FROM pages
-         WHERE subsection_id = ?
-         ORDER BY created_at ASC`,
+      // Get pages for this subsection
+      const [subsectionPageRows] = await db.execute(
+        'SELECT * FROM pages WHERE subsection_id = ? ORDER BY created_at ASC',
         [subsection.id]
-      )) as [RowDataPacket[], any];
+      ) as [RowDataPacket[], any];
 
-      const subsectionPages: any[] = [];
+      const subsectionPages = [];
 
-      for (const page of subPages) {
-        const [blockRows] = (await db.execute(
-          `SELECT * FROM content_blocks
-           WHERE page_id = ?
-           ORDER BY block_order ASC`,
+      for (const page of subsectionPageRows) {
+        // Get content blocks for this page
+        const [blockRows] = await db.execute(
+          'SELECT * FROM content_blocks WHERE page_id = ? ORDER BY block_order ASC',
           [page.id]
-        )) as [RowDataPacket[], any];
+        ) as [RowDataPacket[], any];
 
-        subsectionPages.push({
+        const processedPage = {
           id: page.id,
           title: page.title,
           icon: page.icon,
           type: page.type,
           status: page.status,
-          assignees: safeParseJSON<string[]>(page.assignees, []),
+          assignees: page.assignees ? JSON.parse(page.assignees) : [],
           deadline: page.deadline,
-          properties: safeParseJSON<Record<string, any>>(page.properties, {}),
+          properties: page.properties ? JSON.parse(page.properties) : {},
           createdAt: page.created_at,
           updatedAt: page.updated_at,
-          content: blockRows.map((block: any) => ({
+          content: blockRows.map(block => ({
             id: block.id,
             type: block.type,
             content: block.content,
-            metadata: safeParseJSON<Record<string, any>>(block.metadata, {}),
+            metadata: block.metadata ? JSON.parse(block.metadata) : {},
             createdAt: block.created_at,
-            updatedAt: block.updated_at,
-          })),
-        });
+            updatedAt: block.updated_at
+          }))
+        };
+
+        subsectionPages.push(processedPage);
       }
 
       subsections.push({
         id: subsection.id,
         title: subsection.title,
         order: subsection.subsection_order,
-        pages: subsectionPages,
+        pages: subsectionPages
       });
     }
 
-    // Direct pages under section (no subsection)
-    const [directPagesRows] = (await db.execute(
-      `SELECT * FROM pages
-       WHERE section_id = ? AND subsection_id IS NULL
-       ORDER BY created_at ASC`,
+    // Get direct pages for this section (not in any subsection)
+    const [directPageRows] = await db.execute(
+      'SELECT * FROM pages WHERE section_id = ? AND subsection_id IS NULL ORDER BY created_at ASC',
       [section.id]
-    )) as [RowDataPacket[], any];
+    ) as [RowDataPacket[], any];
 
-    const directPages: any[] = [];
+    const directPages = [];
 
-    for (const page of directPagesRows) {
-      const [blockRows] = (await db.execute(
-        `SELECT * FROM content_blocks
-         WHERE page_id = ?
-         ORDER BY block_order ASC`,
+    for (const page of directPageRows) {
+      // Get content blocks for this page
+      const [blockRows] = await db.execute(
+        'SELECT * FROM content_blocks WHERE page_id = ? ORDER BY block_order ASC',
         [page.id]
-      )) as [RowDataPacket[], any];
+      ) as [RowDataPacket[], any];
 
-      directPages.push({
+      const processedPage = {
         id: page.id,
         title: page.title,
         icon: page.icon,
         type: page.type,
         status: page.status,
-        assignees: safeParseJSON<string[]>(page.assignees, []),
+        assignees: page.assignees ? JSON.parse(page.assignees) : [],
         deadline: page.deadline,
-        properties: safeParseJSON<Record<string, any>>(page.properties, {}),
+        properties: page.properties ? JSON.parse(page.properties) : {},
         createdAt: page.created_at,
         updatedAt: page.updated_at,
-        content: blockRows.map((block: any) => ({
+        content: blockRows.map(block => ({
           id: block.id,
           type: block.type,
           content: block.content,
-          metadata: safeParseJSON<Record<string, any>>(block.metadata, {}),
+          metadata: block.metadata ? JSON.parse(block.metadata) : {},
           createdAt: block.created_at,
-          updatedAt: block.updated_at,
-        })),
-      });
+          updatedAt: block.updated_at
+        }))
+      };
+
+      directPages.push(processedPage);
     }
 
     sections.push({
@@ -160,7 +142,7 @@ async function buildWorkspaceData(db: any, workspaceId: string) {
       icon: section.icon,
       order: section.section_order,
       pages: directPages,
-      subsections,
+      subsections: subsections
     });
   }
 
@@ -170,276 +152,355 @@ async function buildWorkspaceData(db: any, workspaceId: string) {
     description: workspace.description,
     createdAt: workspace.created_at,
     updatedAt: workspace.updated_at,
-    members: memberRows.map((m: any) => ({
-      id: m.id,
-      name: m.name,
-      email: m.email,
-      avatar: m.avatar,
-      role: m.role,
-      createdAt: m.created_at,
-      updatedAt: m.updated_at,
+    members: memberRows.map(member => ({
+      id: member.id,
+      name: member.name,
+      email: member.email,
+      avatar: member.avatar,
+      role: member.role,
+      createdAt: member.created_at,
+      updatedAt: member.updated_at
     })),
-    sections,
+    sections: sections
   };
 }
 
-// -------- Handlers --------
-
-// GET /api/workspaces
-// - With ?id=... -> returns full workspace tree
-// - Without id   -> returns list of all workspaces (basic info)
+// GET /api/workspaces - Get all workspaces or specific workspace
 export async function GET(request: NextRequest) {
+  let db;
+  
   try {
-    // Always ensure database is set up
-    await setupDatabase();
-    debugger
-    const db = await getConnection();
+    db = await getConnection();
     const { searchParams } = new URL(request.url);
-    const workspaceId = searchParams.get("id");
+    const workspaceId = searchParams.get('id');
 
     if (workspaceId) {
-      // For default workspace, ensure it exists
-      if (workspaceId === "default-workspace") {
-        await ensureDefaultWorkspace();
-      }
-
-      const data = await buildWorkspaceData(db, workspaceId);
-      if (!data) {
-        console.error(`❌ Workspace not found: ${workspaceId}`);
-        return NextResponse.json({ error: "Workspace not found" }, { status: 404 });
-      }
+      console.log(`🔍 Fetching workspace: ${workspaceId}`);
       
-      console.log(`✅ Successfully fetched workspace: ${workspaceId}`);
-      return NextResponse.json(data, { status: 200 });
-    }
-
-    // List all workspaces (basic info)
-    const [rows] = (await db.execute(
-      `SELECT id, name, description, created_at, updated_at
-       FROM workspaces
-       ORDER BY created_at DESC`
-    )) as [RowDataPacket[], any];
-
-    const list = rows.map((w: any) => ({
-      id: w.id,
-      name: w.name,
-      description: w.description,
-      createdAt: w.created_at,
-      updatedAt: w.updated_at,
-    }));
-
-    return NextResponse.json(list, { status: 200 });
-  } catch (error) {
-    console.error("❌ Error fetching workspaces:", error);
-    return NextResponse.json(
-      {
-        error: "Internal server error",
-        details:
-          process.env.NODE_ENV === "development"
-            ? (error as Error).message
-            : undefined,
-      },
-      { status: 500 }
-    );
-  }
-}
-
-// POST /api/workspaces
-// Body: { name: string, description?: string, ownerName?: string, ownerEmail?: string }
-export async function POST(request: NextRequest) {
-  const db = await getConnection();
-  const body = await request.json();
-  const { name, description, ownerName, ownerEmail } = body || {};
-
-  if (!name || !String(name).trim()) {
-    return NextResponse.json({ error: "Workspace name is required" }, { status: 400 });
-  }
-
-  const workspaceId = generateUUID();
-
-  try {
-    await db.beginTransaction();
-
-    // Create workspace
-    await db.execute(
-      `INSERT INTO workspaces (id, name, description)
-       VALUES (?, ?, ?)`,
-      [workspaceId, String(name).trim(), description || null]
-    );
-
-    // Owner member (optional)
-    if (ownerName && ownerEmail) {
-      const ownerId = generateUUID();
-      await db.execute(
-        `INSERT INTO workspace_members (id, workspace_id, name, email, role)
-         VALUES (?, ?, ?, ?, 'owner')`,
-        [ownerId, workspaceId, String(ownerName).trim(), String(ownerEmail).trim()]
-      );
-    }
-
-    // Default sections + subsections
-    const defaultSections = [
-      { title: "Company Overview", icon: "🏢", order: 1 },
-      { title: "Marketing",        icon: "📈", order: 2 },
-      { title: "BD & Sales",       icon: "💼", order: 3 },
-      { title: "HR & Operation",   icon: "👥", order: 4 },
-    ];
-
-    for (const s of defaultSections) {
-      const sectionId = generateUUID();
-      await db.execute(
-        `INSERT INTO sections (id, workspace_id, title, icon, section_order)
-         VALUES (?, ?, ?, ?, ?)`,
-        [sectionId, workspaceId, s.title, s.icon, s.order]
-      );
-
-      const defaultSubsections = [
-        { title: "Management", order: 1 },
-        { title: "Execution",  order: 2 },
-        { title: "Inbox",      order: 3 },
-      ];
-
-      for (const sub of defaultSubsections) {
-        const subsectionId = generateUUID();
-        await db.execute(
-          `INSERT INTO subsections (id, section_id, title, subsection_order)
-           VALUES (?, ?, ?, ?)`,
-          [subsectionId, sectionId, sub.title, sub.order]
+      const workspaceData = await buildWorkspaceData(db, workspaceId);
+      
+      if (!workspaceData) {
+        return NextResponse.json(
+          { error: 'Workspace not found' },
+          { status: 404 }
         );
       }
+
+      console.log(`✅ Workspace fetched successfully with ${workspaceData.sections.length} sections`);
+      return NextResponse.json(workspaceData);
+      
+    } else {
+      console.log('📋 Fetching all workspaces');
+      
+      // Get all workspaces (basic info only for listing)
+      const [workspaceRows] = await db.execute(
+        'SELECT id, name, description, created_at, updated_at FROM workspaces ORDER BY created_at DESC'
+      ) as [RowDataPacket[], any];
+
+      const workspaces = workspaceRows.map(workspace => ({
+        id: workspace.id,
+        name: workspace.name,
+        description: workspace.description,
+        createdAt: workspace.created_at,
+        updatedAt: workspace.updated_at
+      }));
+
+      console.log(`✅ Found ${workspaces.length} workspaces`);
+      return NextResponse.json(workspaces);
     }
-
-    await db.commit();
-
-    const created = await buildWorkspaceData(db, workspaceId);
-    return NextResponse.json(created, { status: 201 });
+    
   } catch (error) {
-    await db.rollback();
-    console.error("❌ Error creating workspace:", error);
-    return NextResponse.json(
-      {
-        error: "Failed to create workspace",
-        details:
-          process.env.NODE_ENV === "development"
-            ? (error as Error).message
-            : undefined,
-      },
-      { status: 500 }
-    );
+  console.error('❌ Error fetching workspaces:', error);
+
+  let message = 'Unexpected error';
+  if (error instanceof Error) {
+    message = error.message;
   }
+
+  return NextResponse.json(
+    { 
+      error: 'Internal server error',
+      details: process.env.NODE_ENV === 'development' ? message : undefined
+    },
+    { status: 500 }
+  );
 }
 
-// PUT /api/workspaces
-// Body: { id: string, name: string, description?: string }
+}
+
+// POST /api/workspaces - Create new workspace
+export async function POST(request: NextRequest) {
+  let db;
+  
+  try {
+    db = await getConnection();
+    const body = await request.json();
+    const { name, description, ownerName, ownerEmail } = body;
+
+    // Validate required fields
+    if (!name || !name.trim()) {
+      return NextResponse.json(
+        { error: 'Workspace name is required' },
+        { status: 400 }
+      );
+    }
+
+    console.log(`📝 Creating workspace: ${name}`);
+
+    // Start transaction for workspace creation
+    await db.execute('START TRANSACTION');
+
+    try {
+      const workspaceId = generateUUID();
+
+      // Create the workspace
+      await db.execute(
+        'INSERT INTO workspaces (id, name, description) VALUES (?, ?, ?)',
+        [workspaceId, name.trim(), description || null]
+      );
+
+      console.log(`✅ Workspace created with ID: ${workspaceId}`);
+
+      // Create default owner if provided
+      if (ownerName && ownerEmail) {
+        const ownerId = generateUUID();
+        await db.execute(
+          'INSERT INTO workspace_members (id, workspace_id, name, email, role) VALUES (?, ?, ?, ?, ?)',
+          [ownerId, workspaceId, ownerName.trim(), ownerEmail.trim(), 'owner']
+        );
+        console.log(`✅ Default owner created: ${ownerName}`);
+      }
+
+      // Create default sections with subsections
+      const defaultSections = [
+        { title: 'Company Overview', icon: '🏢', order: 1 },
+        { title: 'Marketing', icon: '📈', order: 2 },
+        { title: 'BD & Sales', icon: '💼', order: 3 },
+        { title: 'HR & Operation', icon: '👥', order: 4 }
+      ];
+
+      for (const sectionData of defaultSections) {
+        const sectionId = generateUUID();
+        
+        // Create section
+        await db.execute(
+          'INSERT INTO sections (id, workspace_id, title, icon, section_order) VALUES (?, ?, ?, ?, ?)',
+          [sectionId, workspaceId, sectionData.title, sectionData.icon, sectionData.order]
+        );
+
+        // Create default subsections for each section
+        const defaultSubsections = [
+          { title: 'Management', order: 1 },
+          { title: 'Execution', order: 2 },
+          { title: 'Inbox', order: 3 }
+        ];
+
+        for (const subsectionData of defaultSubsections) {
+          const subsectionId = generateUUID();
+          await db.execute(
+            'INSERT INTO subsections (id, section_id, title, subsection_order) VALUES (?, ?, ?, ?)',
+            [subsectionId, sectionId, subsectionData.title, subsectionData.order]
+          );
+        }
+      }
+
+      console.log('✅ Default sections and subsections created');
+
+      // Commit transaction
+      await db.execute('COMMIT');
+
+      // Fetch and return the complete workspace data
+      const newWorkspaceData = await buildWorkspaceData(db, workspaceId);
+      
+      console.log(`🎉 Workspace "${name}" created successfully`);
+      return NextResponse.json(newWorkspaceData, { status: 201 });
+
+    } catch (transactionError) {
+      // Rollback on error
+      await db.execute('ROLLBACK');
+      throw transactionError;
+    }
+
+  } catch (error) {
+  console.error('❌ Error creating workspace:', error);
+
+  let message = 'Unexpected error';
+  if (error instanceof Error) {
+    message = error.message;
+  }
+
+  return NextResponse.json(
+    { 
+      error: 'Failed to create workspace',
+      details: process.env.NODE_ENV === 'development' ? message : undefined
+    },
+    { status: 500 }
+  );
+}
+
+}
+
+// PUT /api/workspaces - Update workspace
 export async function PUT(request: NextRequest) {
-  const db = await getConnection();
-  const body = await request.json();
-  const { id, name, description } = body || {};
-
-  if (!id) {
-    return NextResponse.json({ error: "Workspace ID is required" }, { status: 400 });
-  }
-  if (!name || !String(name).trim()) {
-    return NextResponse.json({ error: "Workspace name is required" }, { status: 400 });
-  }
-
+  let db;
+  
   try {
-    const [existing] = (await db.execute(
-      `SELECT id FROM workspaces WHERE id = ?`,
+    db = await getConnection();
+    const body = await request.json();
+    const { id, name, description } = body;
+
+    // Validate required fields
+    if (!id) {
+      return NextResponse.json(
+        { error: 'Workspace ID is required' },
+        { status: 400 }
+      );
+    }
+
+    if (!name || !name.trim()) {
+      return NextResponse.json(
+        { error: 'Workspace name is required' },
+        { status: 400 }
+      );
+    }
+
+    console.log(`📝 Updating workspace: ${id}`);
+
+    // Check if workspace exists
+    const [existingRows] = await db.execute(
+      'SELECT id FROM workspaces WHERE id = ?',
       [id]
-    )) as [RowDataPacket[], any];
+    ) as [RowDataPacket[], any];
 
-    if (existing.length === 0) {
-      return NextResponse.json({ error: "Workspace not found" }, { status: 404 });
+    if (existingRows.length === 0) {
+      return NextResponse.json(
+        { error: 'Workspace not found' },
+        { status: 404 }
+      );
     }
 
-    const [result] = (await db.execute(
-      `UPDATE workspaces
-       SET name = ?, description = ?, updated_at = CURRENT_TIMESTAMP
-       WHERE id = ?`,
-      [String(name).trim(), description || null, id]
-    )) as [ResultSetHeader, any];
+    // Update the workspace
+    const [result] = await db.execute(
+      'UPDATE workspaces SET name = ?, description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [name.trim(), description || null, id]
+    ) as [ResultSetHeader, any];
 
-    if ((result as ResultSetHeader).affectedRows === 0) {
-      return NextResponse.json({ error: "Failed to update workspace" }, { status: 500 });
+    if (result.affectedRows === 0) {
+      return NextResponse.json(
+        { error: 'Failed to update workspace' },
+        { status: 500 }
+      );
     }
 
-    const updated = await buildWorkspaceData(db, id);
-    return NextResponse.json(updated, { status: 200 });
+    console.log(`✅ Workspace updated successfully`);
+
+    // Fetch and return the updated workspace data
+    const updatedWorkspaceData = await buildWorkspaceData(db, id);
+    return NextResponse.json(updatedWorkspaceData);
+
   } catch (error) {
-    console.error("❌ Error updating workspace:", error);
-    return NextResponse.json(
-      {
-        error: "Failed to update workspace",
-        details:
-          process.env.NODE_ENV === "development"
-            ? (error as Error).message
-            : undefined,
-      },
-      { status: 500 }
-    );
+  console.error('❌ Error updating workspace:', error);
+
+  let message = 'Unexpected error';
+  if (error instanceof Error) {
+    message = error.message;
   }
+
+  return NextResponse.json(
+    { 
+      error: 'Failed to update workspace',
+      details: process.env.NODE_ENV === 'development' ? message : undefined
+    },
+    { status: 500 }
+  );
 }
 
-// DELETE /api/workspaces?id=...
+}
+
+// DELETE /api/workspaces - Delete workspace
 export async function DELETE(request: NextRequest) {
-  const db = await getConnection();
-  const { searchParams } = new URL(request.url);
-  const workspaceId = searchParams.get("id");
-
-  if (!workspaceId) {
-    return NextResponse.json({ error: "Workspace ID is required" }, { status: 400 });
-  }
-
+  let db;
+  
   try {
-    const [existing] = (await db.execute(
-      `SELECT id, name FROM workspaces WHERE id = ?`,
-      [workspaceId]
-    )) as [RowDataPacket[], any];
+    db = await getConnection();
+    const { searchParams } = new URL(request.url);
+    const workspaceId = searchParams.get('id');
 
-    if (existing.length === 0) {
-      return NextResponse.json({ error: "Workspace not found" }, { status: 404 });
+    if (!workspaceId) {
+      return NextResponse.json(
+        { error: 'Workspace ID is required' },
+        { status: 400 }
+      );
     }
 
-    // Stats before deletion
-    const [[{ count: sectionsCount }]] = (await db.execute(
-      `SELECT COUNT(*) AS count FROM sections WHERE workspace_id = ?`,
-      [workspaceId]
-    )) as any;
+    console.log(`🗑️ Deleting workspace: ${workspaceId}`);
 
-    const [[{ count: pagesCount }]] = (await db.execute(
-      `SELECT COUNT(*) AS count FROM pages WHERE workspace_id = ?`,
+    // Check if workspace exists
+    const [existingRows] = await db.execute(
+      'SELECT id, name FROM workspaces WHERE id = ?',
       [workspaceId]
-    )) as any;
+    ) as [RowDataPacket[], any];
 
-    const [res] = (await db.execute(
-      `DELETE FROM workspaces WHERE id = ?`,
-      [workspaceId]
-    )) as [ResultSetHeader, any];
-
-    if ((res as ResultSetHeader).affectedRows === 0) {
-      return NextResponse.json({ error: "Failed to delete workspace" }, { status: 500 });
+    if (existingRows.length === 0) {
+      return NextResponse.json(
+        { error: 'Workspace not found' },
+        { status: 404 }
+      );
     }
 
-    return NextResponse.json(
-      {
-        success: true,
-        message: `Workspace "${existing[0].name}" and related data deleted`,
-        deletedCounts: { sections: sectionsCount, pages: pagesCount },
-      },
-      { status: 200 }
-    );
+    const workspaceName = existingRows[0].name;
+
+    // Get statistics before deletion
+    const [sectionCount] = await db.execute(
+      'SELECT COUNT(*) as count FROM sections WHERE workspace_id = ?',
+      [workspaceId]
+    ) as [RowDataPacket[], any];
+
+    const [pageCount] = await db.execute(
+      'SELECT COUNT(*) as count FROM pages WHERE workspace_id = ?',
+      [workspaceId]
+    ) as [RowDataPacket[], any];
+
+    // Delete workspace (cascading deletes will handle related records)
+    const [result] = await db.execute(
+      'DELETE FROM workspaces WHERE id = ?',
+      [workspaceId]
+    ) as [ResultSetHeader, any];
+
+    if (result.affectedRows === 0) {
+      return NextResponse.json(
+        { error: 'Failed to delete workspace' },
+        { status: 500 }
+      );
+    }
+
+    console.log(`✅ Workspace "${workspaceName}" deleted successfully`);
+    console.log(`   📊 Removed: ${sectionCount[0].count} sections, ${pageCount[0].count} pages`);
+
+    return NextResponse.json({ 
+      success: true, 
+      message: `Workspace "${workspaceName}" and all related data deleted successfully`,
+      deletedCounts: {
+        sections: sectionCount[0].count,
+        pages: pageCount[0].count
+      }
+    });
+
   } catch (error) {
-    console.error("❌ Error deleting workspace:", error);
-    return NextResponse.json(
-      {
-        error: "Failed to delete workspace",
-        details:
-          process.env.NODE_ENV === "development"
-            ? (error as Error).message
-            : undefined,
-      },
-      { status: 500 }
-    );
+  console.error('❌ Error deleting workspace:', error);
+
+  let message = 'Unexpected error';
+  if (error instanceof Error) {
+    message = error.message;
   }
+
+  return NextResponse.json(
+    { 
+      error: 'Failed to delete workspace',
+      details: process.env.NODE_ENV === 'development' ? message : undefined
+    },
+    { status: 500 }
+  );
+}
+
 }

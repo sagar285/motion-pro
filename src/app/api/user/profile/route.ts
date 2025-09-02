@@ -1,32 +1,54 @@
 // app/api/user/profile/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { getConnection } from "@/lib/database";
+import { verifyToken, getUserById, updateUser } from "@/lib/auth";
 import type { RowDataPacket, ResultSetHeader } from "mysql2";
 import bcrypt from "bcryptjs";
+
+// Helper function to get authenticated user from request
+async function getAuthenticatedUser(request: NextRequest) {
+  // Method 1: Get from middleware headers (your middleware sets this)
+  const userIdFromMiddleware = request.headers.get('user-id');
+  if (userIdFromMiddleware) {
+    const userId = parseInt(userIdFromMiddleware);
+    if (!isNaN(userId)) {
+      return await getUserById(userId);
+    }
+  }
+
+  // Method 2: Fallback to JWT token verification (if middleware didn't run)
+  const token = request.cookies.get('auth-token')?.value;
+  if (!token) {
+    return null;
+  }
+
+  const secret = new TextEncoder().encode("Aman1234");
+  
+  try {
+    const { jwtVerify } = await import('jose');
+    const { payload } = await jwtVerify(token, secret);
+    
+    if (payload?.id && typeof payload.id === 'number') {
+      return await getUserById(payload.id as number);
+    }
+  } catch (error) {
+    console.error('JWT verification failed:', error);
+  }
+
+  return null;
+}
 
 // GET /api/user/profile
 // Returns current user's profile information
 export async function GET(request: NextRequest) {
   try {
-    const db = await getConnection();
+    const user = await getAuthenticatedUser(request);
     
-    // In a real app, you'd get the user ID from session/JWT token
-    // For now, we'll use a mock user ID or get it from headers
-    const userId = request.headers.get('x-user-id') || '1'; // Mock user ID
-    
-    const [userRows] = (await db.execute(
-      `SELECT id, name, email, phone, email_verified, created_at, updated_at
-       FROM users WHERE id = ?`,
-      [userId]
-    )) as [RowDataPacket[], any];
-
-    if (userRows.length === 0) {
-      return NextResponse.json({ error: "User not found" }, { status: 404 });
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const user = userRows[0];
-    
-    // Remove sensitive information
+    // Return user profile without sensitive data
     const safeUser = {
       id: user.id,
       name: user.name,
@@ -52,42 +74,35 @@ export async function GET(request: NextRequest) {
 
 // PUT /api/user/profile
 // Updates user profile information
-// Body: { name?: string, email?: string, phone?: string, currentPassword?: string, newPassword?: string }
 export async function PUT(request: NextRequest) {
   try {
-    const db = await getConnection();
-    const body = await request.json();
-    const { name, email, phone, currentPassword, newPassword } = body || {};
+    const user = await getAuthenticatedUser(request);
     
-    // In a real app, you'd get the user ID from session/JWT token
-    const userId = request.headers.get('x-user-id') || '1'; // Mock user ID
-
-    // Validate that user exists
-    const [userRows] = (await db.execute(
-      `SELECT id, email, password FROM users WHERE id = ?`,
-      [userId]
-    )) as [RowDataPacket[], any];
-
-    if (userRows.length === 0) {
-      return NextResponse.json({ error: "User not found" }, { status: 404 });
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const currentUser = userRows[0];
+    const body = await request.json();
+    const { name, email, phone, currentPassword, newPassword } = body || {};
+
+    const db = await getConnection();
 
     // Build update query dynamically
     const updates: string[] = [];
     const values: any[] = [];
 
-    if (name && String(name).trim()) {
+    // Validate and add name
+    if (name !== undefined && String(name).trim()) {
       updates.push('name = ?');
       values.push(String(name).trim());
     }
 
-    if (email && String(email).trim()) {
+    // Validate and add email
+    if (email !== undefined && String(email).trim()) {
       // Check if email is already taken by another user
       const [emailCheck] = (await db.execute(
         `SELECT id FROM users WHERE email = ? AND id != ?`,
-        [String(email).trim(), userId]
+        [String(email).trim(), user.id]
       )) as [RowDataPacket[], any];
 
       if (emailCheck.length > 0) {
@@ -95,10 +110,12 @@ export async function PUT(request: NextRequest) {
       }
 
       updates.push('email = ?');
-      updates.push('email_verified = FALSE'); // Reset verification when email changes
+      // Reset email verification when email changes
+      updates.push('email_verified = FALSE');
       values.push(String(email).trim());
     }
 
+    // Handle phone (can be null)
     if (phone !== undefined) {
       updates.push('phone = ?');
       values.push(phone ? String(phone).trim() : null);
@@ -107,18 +124,37 @@ export async function PUT(request: NextRequest) {
     // Handle password change
     if (newPassword) {
       if (!currentPassword) {
-        return NextResponse.json({ error: "Current password is required to set new password" }, { status: 400 });
+        return NextResponse.json({ 
+          error: "Current password is required to set new password" 
+        }, { status: 400 });
       }
 
       // Verify current password
-      const passwordMatch = await bcrypt.compare(currentPassword, currentUser.password);
+      if (!user.password) {
+        return NextResponse.json({ 
+          error: "Unable to verify current password" 
+        }, { status: 400 });
+      }
+
+      const passwordMatch = await bcrypt.compare(currentPassword, user.password);
       if (!passwordMatch) {
-        return NextResponse.json({ error: "Current password is incorrect" }, { status: 400 });
+        return NextResponse.json({ 
+          error: "Current password is incorrect" 
+        }, { status: 400 });
+      }
+
+      // Validate new password
+      if (newPassword.length < 6) {
+        return NextResponse.json({ 
+          error: "New password must be at least 6 characters long" 
+        }, { status: 400 });
       }
 
       // Hash new password
-      const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+      const hashedNewPassword = await bcrypt.hash(newPassword, 12);
       updates.push('password = ?');
+      updates.push('reset_token = NULL');
+      updates.push('reset_token_expires = NULL');
       values.push(hashedNewPassword);
     }
 
@@ -126,9 +162,9 @@ export async function PUT(request: NextRequest) {
       return NextResponse.json({ error: "No valid fields to update" }, { status: 400 });
     }
 
-    // Add updated_at
+    // Add updated_at and user ID
     updates.push('updated_at = CURRENT_TIMESTAMP');
-    values.push(userId);
+    values.push(user.id);
 
     // Execute update
     const [result] = (await db.execute(
@@ -141,26 +177,25 @@ export async function PUT(request: NextRequest) {
     }
 
     // Fetch updated user data
-    const [updatedUserRows] = (await db.execute(
-      `SELECT id, name, email, phone, email_verified, created_at, updated_at
-       FROM users WHERE id = ?`,
-      [userId]
-    )) as [RowDataPacket[], any];
+    const updatedUser = await getUserById(user.id);
+    if (!updatedUser) {
+      return NextResponse.json({ error: "Failed to fetch updated user" }, { status: 500 });
+    }
 
-    const updatedUser = {
-      id: updatedUserRows[0].id,
-      name: updatedUserRows[0].name,
-      email: updatedUserRows[0].email,
-      phone: updatedUserRows[0].phone,
-      emailVerified: updatedUserRows[0].email_verified,
-      createdAt: updatedUserRows[0].created_at,
-      updatedAt: updatedUserRows[0].updated_at,
+    const updatedUserResponse = {
+      id: updatedUser.id,
+      name: updatedUser.name,
+      email: updatedUser.email,
+      phone: updatedUser.phone,
+      emailVerified: updatedUser.email_verified,
+      createdAt: updatedUser.created_at,
+      updatedAt: updatedUser.updated_at,
     };
 
     return NextResponse.json({
       success: true,
       message: "Profile updated successfully",
-      user: updatedUser,
+      user: updatedUserResponse,
     }, { status: 200 });
 
   } catch (error) {

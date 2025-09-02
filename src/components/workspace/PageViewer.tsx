@@ -18,7 +18,6 @@ interface PageViewerProps {
 export const PageViewer: React.FC<PageViewerProps> = ({ page }) => {
   const { state, dispatch, actions } = useWorkspace();
   const [showBlockSelector, setShowBlockSelector] = useState(false);
-  const [blockSelectorPosition, setBlockSelectorPosition] = useState<{ x: number; y: number } | undefined>();
   const [draggedBlockId, setDraggedBlockId] = useState<string | null>(null);
   const [dragOverBlockId, setDragOverBlockId] = useState<string | null>(null);
   const [dragPosition, setDragPosition] = useState<'before' | 'after' | null>(null);
@@ -160,12 +159,7 @@ export const PageViewer: React.FC<PageViewerProps> = ({ page }) => {
     setDragPosition(null);
   };
 
-  const handleAddBlockClick = (event: React.MouseEvent) => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    setBlockSelectorPosition({
-      x: rect.left,
-      y: rect.bottom + 5
-    });
+  const handleAddBlockClick = () => {
     setShowBlockSelector(true);
   };
 
@@ -439,14 +433,6 @@ export const PageViewer: React.FC<PageViewerProps> = ({ page }) => {
                     {state.loading ? 'Adding block...' : 'Click to add a block, or type "/" for commands'}
                   </span>
                 </button>
-                
-                {showBlockSelector && (
-                  <BlockTypeSelector 
-                    onSelect={(type, options) => addNewBlock(type, options)}
-                    onClose={() => setShowBlockSelector(false)}
-                    position={blockSelectorPosition}
-                  />
-                )}
               </div>
             </div>
           </div>
@@ -455,6 +441,14 @@ export const PageViewer: React.FC<PageViewerProps> = ({ page }) => {
         {/* Comments Panel */}
         <CommentsPanel pageId={page.id} />
       </div>
+
+      {/* Block Selector Modal */}
+      {showBlockSelector && (
+        <BlockTypeSelector 
+          onSelect={(type, options) => addNewBlock(type, options)}
+          onClose={() => setShowBlockSelector(false)}
+        />
+      )}
     </div>
   );
 };

@@ -23,9 +23,9 @@ export async function middleware(request: NextRequest) {
     if (token) {
       try {
         const { payload } = await jwtVerify(token, secret);
-
+   console.log(payload,"kkkjjjjjjjjjjjjjj")
         if (isAuthRoute) {
-          return NextResponse.redirect(new URL('/dashboard', request.url));
+          // return NextResponse.redirect(new URL('/dashboard', request.url));
         }
 
         const requestHeaders = new Headers(request.headers);

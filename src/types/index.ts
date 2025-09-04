@@ -17,6 +17,7 @@ export interface PageItem {
   assignees?: string[];
   deadline?: string;
   content?: ContentBlock[];
+  children?: PageItem[];  // Add this line
   properties?: Record<string, any>;
   createdAt: Date;
   updatedAt: Date;

@@ -1,10 +1,11 @@
-// lib/auth.ts
+// 
+// lib/auth.ts (Fixed version with connection pool)
 import bcrypt from 'bcryptjs';
 import { SignJWT, jwtVerify } from 'jose';
-import { getConnection } from './database';
+import { executeQuery } from './database'; // Use executeQuery instead of getConnection
 import { RowDataPacket, ResultSetHeader } from 'mysql2';
 
-// Core Interfaces
+// Core Interfaces (keep as is)
 export interface User {
   id: number;
   name: string;
@@ -80,7 +81,7 @@ function isCustomJWTPayload(payload: any): payload is CustomJWTPayload {
   );
 }
 
-// Password Management
+// Password Management (keep as is)
 export async function hashPassword(password: string): Promise<string> {
   if (!password || password.length < 6) {
     throw new Error('Password must be at least 6 characters long');
@@ -95,7 +96,7 @@ export async function verifyPassword(password: string, hashedPassword: string): 
   return await bcrypt.compare(password, hashedPassword);
 }
 
-// JWT Token Management with JOSE
+// JWT Token Management with JOSE (keep as is)
 export async function generateToken(payload: Omit<CustomJWTPayload, 'iat' | 'exp'>): Promise<string> {
   if (!JWT_SECRET) {
     throw new Error('JWT_SECRET environment variable is not set');
@@ -159,7 +160,7 @@ export async function generateRefreshToken(): Promise<string> {
   }
 }
 
-// OTP Management
+// OTP Management (FIXED - using executeQuery)
 export function generateOTP(length: number = 6): string {
   const min = Math.pow(10, length - 1);
   const max = Math.pow(10, length) - 1;
@@ -175,22 +176,21 @@ export async function storeOTP(
     throw new Error('Email and OTP are required');
   }
 
-  const db = await getConnection();
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
   
   try {
     // Delete existing OTPs for this email and type
-    await db.execute(
+    await executeQuery(
       'DELETE FROM otps WHERE email = ? AND type = ?',
       [email.toLowerCase().trim(), type]
     );
     
     // Insert new OTP
-    await db.execute(
+    await executeQuery(
       'INSERT INTO otps (email, otp, type, expires_at) VALUES (?, ?, ?, ?)',
       [email.toLowerCase().trim(), otp, type, expiresAt]
     );
-  } catch (error) {
+  } catch (error: any) {
     console.error('Failed to store OTP:', error);
     throw new Error('Failed to generate verification code');
   }
@@ -204,11 +204,9 @@ export async function verifyOTP(
   if (!email || !otp) {
     return false;
   }
-
-  const db = await getConnection();
   
   try {
-    const [rows] = await db.execute<OTPRecord[]>(
+    const [rows] = await executeQuery<OTPRecord[]>(
       'SELECT * FROM otps WHERE email = ? AND otp = ? AND type = ? AND expires_at > NOW() AND used = FALSE',
       [email.toLowerCase().trim(), otp, type]
     );
@@ -218,29 +216,27 @@ export async function verifyOTP(
     }
     
     // Mark OTP as used
-    await db.execute(
+    await executeQuery(
       'UPDATE otps SET used = TRUE WHERE id = ?',
       [rows[0].id]
     );
     
     return true;
-  } catch (error) {
+  } catch (error: any) {
     console.error('OTP verification failed:', error);
     return false;
   }
 }
 
 export async function cleanupExpiredOTPs(): Promise<void> {
-  const db = await getConnection();
-  
   try {
-    await db.execute('DELETE FROM otps WHERE expires_at < NOW() OR used = TRUE');
+    await executeQuery('DELETE FROM otps WHERE expires_at < NOW() OR used = TRUE');
   } catch (error) {
     console.error('Failed to cleanup expired OTPs:', error);
   }
 }
 
-// User Management
+// User Management (FIXED - using executeQuery)
 export async function createUser(userData: CreateUserData): Promise<UserResponse> {
   const { name, email, phone, password } = userData;
   
@@ -254,12 +250,11 @@ export async function createUser(userData: CreateUserData): Promise<UserResponse
     throw new Error('Invalid email format');
   }
 
-  const db = await getConnection();
   const cleanEmail = email.toLowerCase().trim();
   
   try {
     // Check if user exists
-    const [existingUsers] = await db.execute<RowDataPacket[]>(
+    const [existingUsers] = await executeQuery<RowDataPacket[]>(
       'SELECT id FROM users WHERE email = ?',
       [cleanEmail]
     );
@@ -272,7 +267,7 @@ export async function createUser(userData: CreateUserData): Promise<UserResponse
     const hashedPassword = await hashPassword(password);
     
     // Insert user
-    const [result] = await db.execute<ResultSetHeader>(
+    const [result] = await executeQuery<ResultSetHeader>(
       'INSERT INTO users (name, email, phone, password, email_verified) VALUES (?, ?, ?, ?, ?)',
       [name.trim(), cleanEmail, phone?.trim() || null, hashedPassword, false]
     );
@@ -297,19 +292,17 @@ export async function getUserByEmail(email: string): Promise<User | null> {
   if (!email) {
     return null;
   }
-
-  const db = await getConnection();
   
   try {
-    const [rows] = await db.execute<(User & RowDataPacket)[]>(
+    const [rows] = await executeQuery<(User & RowDataPacket)[]>(
       'SELECT * FROM users WHERE email = ?',
       [email.toLowerCase().trim()]
     );
     
     return rows[0] || null;
-  } catch (error) {
+  } catch (error: any) {
     console.error('Failed to get user by email:', error);
-    return null;
+    throw new Error('Database error while fetching user by email');
   }
 }
 
@@ -317,19 +310,17 @@ export async function getUserById(id: number): Promise<User | null> {
   if (!id || id <= 0) {
     return null;
   }
-
-  const db = await getConnection();
   
   try {
-    const [rows] = await db.execute<(User & RowDataPacket)[]>(
+    const [rows] = await executeQuery<(User & RowDataPacket)[]>(
       'SELECT * FROM users WHERE id = ?',
       [id]
     );
     
     return rows[0] || null;
-  } catch (error) {
+  } catch (error: any) {
     console.error('Failed to get user by ID:', error);
-    return null;
+    throw new Error('Database error while fetching user by ID');
   }
 }
 
@@ -338,7 +329,6 @@ export async function updateUser(id: number, updates: Partial<User>): Promise<bo
     return false;
   }
 
-  const db = await getConnection();
   const allowedFields = ['name', 'phone', 'email_verified'];
   const updateFields: string[] = [];
   const updateValues: any[] = [];
@@ -357,13 +347,13 @@ export async function updateUser(id: number, updates: Partial<User>): Promise<bo
     
     updateValues.push(id);
     
-    const [result] = await db.execute<ResultSetHeader>(
+    const [result] = await executeQuery<ResultSetHeader>(
       `UPDATE users SET ${updateFields.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
       updateValues
     );
     
     return result.affectedRows > 0;
-  } catch (error) {
+  } catch (error: any) {
     console.error('Failed to update user:', error);
     return false;
   }
@@ -373,17 +363,15 @@ export async function verifyUserEmail(email: string): Promise<boolean> {
   if (!email) {
     return false;
   }
-
-  const db = await getConnection();
   
   try {
-    const [result] = await db.execute<ResultSetHeader>(
+    const [result] = await executeQuery<ResultSetHeader>(
       'UPDATE users SET email_verified = TRUE, updated_at = CURRENT_TIMESTAMP WHERE email = ?',
       [email.toLowerCase().trim()]
     );
     
     return result.affectedRows > 0;
-  } catch (error) {
+  } catch (error: any) {
     console.error('Failed to verify user email:', error);
     return false;
   }
@@ -393,19 +381,17 @@ export async function updatePassword(email: string, newPassword: string): Promis
   if (!email || !newPassword) {
     return false;
   }
-
-  const db = await getConnection();
   
   try {
     const hashedPassword = await hashPassword(newPassword);
     
-    const [result] = await db.execute<ResultSetHeader>(
+    const [result] = await executeQuery<ResultSetHeader>(
       'UPDATE users SET password = ?, reset_token = NULL, reset_token_expires = NULL, updated_at = CURRENT_TIMESTAMP WHERE email = ?',
       [hashedPassword, email.toLowerCase().trim()]
     );
     
     return result.affectedRows > 0;
-  } catch (error) {
+  } catch (error: any) {
     console.error('Failed to update password:', error);
     return false;
   }
@@ -415,23 +401,21 @@ export async function deleteUser(id: number): Promise<boolean> {
   if (!id || id <= 0) {
     return false;
   }
-
-  const db = await getConnection();
   
   try {
-    const [result] = await db.execute<ResultSetHeader>(
+    const [result] = await executeQuery<ResultSetHeader>(
       'DELETE FROM users WHERE id = ?',
       [id]
     );
     
     return result.affectedRows > 0;
-  } catch (error) {
+  } catch (error: any) {
     console.error('Failed to delete user:', error);
     return false;
   }
 }
 
-// Authentication
+// Authentication (keep logic, fix database calls)
 export async function authenticateUser(email: string, password: string): Promise<UserResponse | null> {
   if (!email || !password) {
     return null;
@@ -458,34 +442,31 @@ export async function authenticateUser(email: string, password: string): Promise
     // Return user without password
     const { password: _, reset_token, reset_token_expires, created_at, updated_at, ...userWithoutPassword } = user;
     return userWithoutPassword;
-  } catch (error) {
+  } catch (error: any) {
     console.error('Authentication failed:', error);
     return null;
   }
 }
 
-// Session Management
+// Session Management (FIXED - using executeQuery)
 export async function createSession(userId: number, sessionToken: string): Promise<boolean> {
-  const db = await getConnection();
   const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
   
   try {
-    await db.execute(
+    await executeQuery(
       'INSERT INTO sessions (user_id, session_token, expires_at) VALUES (?, ?, ?)',
       [userId, sessionToken, expiresAt]
     );
     return true;
-  } catch (error) {
+  } catch (error: any) {
     console.error('Failed to create session:', error);
     return false;
   }
 }
 
 export async function validateSession(sessionToken: string): Promise<User | null> {
-  const db = await getConnection();
-  
   try {
-    const [rows] = await db.execute<(SessionData & RowDataPacket)[]>(
+    const [rows] = await executeQuery<(SessionData & RowDataPacket)[]>(
       'SELECT s.*, u.* FROM sessions s JOIN users u ON s.user_id = u.id WHERE s.session_token = ? AND s.expires_at > NOW()',
       [sessionToken]
     );
@@ -495,54 +476,49 @@ export async function validateSession(sessionToken: string): Promise<User | null
     }
     
     return rows[0] as any; // TypeScript workaround for joined query
-  } catch (error) {
+  } catch (error: any) {
     console.error('Session validation failed:', error);
     return null;
   }
 }
 
 export async function deleteSession(sessionToken: string): Promise<boolean> {
-  const db = await getConnection();
-  
   try {
-    const [result] = await db.execute<ResultSetHeader>(
+    const [result] = await executeQuery<ResultSetHeader>(
       'DELETE FROM sessions WHERE session_token = ?',
       [sessionToken]
     );
     return result.affectedRows > 0;
-  } catch (error) {
+  } catch (error: any) {
     console.error('Failed to delete session:', error);
     return false;
   }
 }
 
 export async function cleanupExpiredSessions(): Promise<void> {
-  const db = await getConnection();
-  
   try {
-    await db.execute('DELETE FROM sessions WHERE expires_at < NOW()');
-  } catch (error) {
+    await executeQuery('DELETE FROM sessions WHERE expires_at < NOW()');
+  } catch (error: any) {
     console.error('Failed to cleanup expired sessions:', error);
   }
 }
 
-// Reset Token Management
+// Reset Token Management (FIXED - using executeQuery)
 export async function storeResetToken(email: string, token: string): Promise<boolean> {
   if (!email || !token) {
     return false;
   }
 
-  const db = await getConnection();
   const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
   
   try {
-    const [result] = await db.execute<ResultSetHeader>(
+    const [result] = await executeQuery<ResultSetHeader>(
       'UPDATE users SET reset_token = ?, reset_token_expires = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ?',
       [token, expiresAt, email.toLowerCase().trim()]
     );
     
     return result.affectedRows > 0;
-  } catch (error) {
+  } catch (error: any) {
     console.error('Failed to store reset token:', error);
     return false;
   }
@@ -552,47 +528,41 @@ export async function verifyResetToken(token: string): Promise<User | null> {
   if (!token) {
     return null;
   }
-
-  const db = await getConnection();
   
   try {
-    const [rows] = await db.execute<(User & RowDataPacket)[]>(
+    const [rows] = await executeQuery<(User & RowDataPacket)[]>(
       'SELECT * FROM users WHERE reset_token = ? AND reset_token_expires > NOW()',
       [token]
     );
     
     return rows[0] || null;
-  } catch (error) {
+  } catch (error: any) {
     console.error('Reset token verification failed:', error);
     return null;
   }
 }
 
-// Security & Logging
+// Security & Logging (FIXED - using executeQuery)
 export async function logLoginAttempt(email: string, ipAddress: string, success: boolean): Promise<void> {
-  const db = await getConnection();
-  
   try {
-    await db.execute(
+    await executeQuery(
       'INSERT INTO login_attempts (email, ip_address, success, attempted_at) VALUES (?, ?, ?, NOW())',
       [email.toLowerCase().trim(), ipAddress, success]
     );
-  } catch (error) {
+  } catch (error: any) {
     console.error('Failed to log login attempt:', error);
   }
 }
 
 export async function getRecentLoginAttempts(email: string, timeWindowMinutes: number = 15): Promise<number> {
-  const db = await getConnection();
-  
   try {
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [rows] = await executeQuery<RowDataPacket[]>(
       'SELECT COUNT(*) as count FROM login_attempts WHERE email = ? AND success = FALSE AND attempted_at > DATE_SUB(NOW(), INTERVAL ? MINUTE)',
       [email.toLowerCase().trim(), timeWindowMinutes]
     );
     
     return rows[0]?.count || 0;
-  } catch (error) {
+  } catch (error: any) {
     console.error('Failed to get login attempts:', error);
     return 0;
   }
@@ -603,7 +573,7 @@ export async function isAccountLocked(email: string): Promise<boolean> {
   return attempts >= 5; // Lock after 5 failed attempts in 15 minutes
 }
 
-// Utility Functions
+// Utility Functions (keep as is)
 export function sanitizeUserForResponse(user: User): UserResponse {
   const { password, reset_token, reset_token_expires, created_at, updated_at, ...sanitized } = user;
   return sanitized;

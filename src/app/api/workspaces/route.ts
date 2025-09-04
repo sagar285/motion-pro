@@ -11,6 +11,83 @@ function generateUUID(): string {
   });
 }
 
+// Helper function to build page hierarchy recursively
+async function buildPageHierarchy(db: any, pages: any[]) {
+  // Create a map for quick lookup
+  const pageMap = new Map();
+  const rootPages = [];
+
+  // First pass: create page objects and organize by parent
+  for (const page of pages) {
+    // Get content blocks for this page
+    const [blockRows] = await db.execute(
+      'SELECT * FROM content_blocks WHERE page_id = ? ORDER BY block_order ASC',
+      [page.id]
+    ) as [RowDataPacket[], any];
+
+    const processedPage = {
+      id: page.id,
+      parentId: page.parent_id,
+      sectionId: page.section_id,
+      subsectionId: page.subsection_id,
+      workspaceId: page.workspace_id,
+      title: page.title,
+      icon: page.icon,
+      type: page.type,
+      status: page.status,
+      assignees: page.assignees ? JSON.parse(page.assignees) : [],
+      deadline: page.deadline,
+      properties: page.properties ? JSON.parse(page.properties) : {},
+      pageOrder: page.page_order,
+      createdAt: page.created_at,
+      updatedAt: page.updated_at,
+      content: blockRows.map(block => ({
+        id: block.id,
+        type: block.type,
+        content: block.content,
+        metadata: block.metadata ? JSON.parse(block.metadata) : {},
+        createdAt: block.created_at,
+        updatedAt: block.updated_at
+      })),
+      children: [] // Will be populated with child pages
+    };
+
+    pageMap.set(page.id, processedPage);
+
+    // If it's a root page (no parent), add to root pages
+    if (!page.parent_id) {
+      rootPages.push(processedPage);
+    }
+  }
+
+  // Second pass: build parent-child relationships
+  for (const page of pages) {
+    if (page.parent_id && pageMap.has(page.parent_id)) {
+      const parentPage = pageMap.get(page.parent_id);
+      const childPage = pageMap.get(page.id);
+      parentPage.children.push(childPage);
+    }
+  }
+
+  // Sort pages by order
+  const sortByOrder = (a, b) => (a.pageOrder || 0) - (b.pageOrder || 0);
+  
+  // Sort root pages
+  rootPages.sort(sortByOrder);
+  
+  // Recursively sort children
+  const sortChildren = (page) => {
+    if (page.children && page.children.length > 0) {
+      page.children.sort(sortByOrder);
+      page.children.forEach(sortChildren);
+    }
+  };
+  
+  rootPages.forEach(sortChildren);
+
+  return rootPages;
+}
+
 // Helper function to build complete workspace data structure
 async function buildWorkspaceData(db: any, workspaceId: string) {
   // Get workspace basic info
@@ -50,44 +127,14 @@ async function buildWorkspaceData(db: any, workspaceId: string) {
 
     // Process each subsection
     for (const subsection of subsectionRows) {
-      // Get pages for this subsection
+      // Get ALL pages for this subsection (including child pages)
       const [subsectionPageRows] = await db.execute(
-        'SELECT * FROM pages WHERE subsection_id = ? ORDER BY created_at ASC',
+        'SELECT * FROM pages WHERE subsection_id = ? ORDER BY page_order ASC, created_at ASC',
         [subsection.id]
       ) as [RowDataPacket[], any];
 
-      const subsectionPages = [];
-
-      for (const page of subsectionPageRows) {
-        // Get content blocks for this page
-        const [blockRows] = await db.execute(
-          'SELECT * FROM content_blocks WHERE page_id = ? ORDER BY block_order ASC',
-          [page.id]
-        ) as [RowDataPacket[], any];
-
-        const processedPage = {
-          id: page.id,
-          title: page.title,
-          icon: page.icon,
-          type: page.type,
-          status: page.status,
-          assignees: page.assignees ? JSON.parse(page.assignees) : [],
-          deadline: page.deadline,
-          properties: page.properties ? JSON.parse(page.properties) : {},
-          createdAt: page.created_at,
-          updatedAt: page.updated_at,
-          content: blockRows.map(block => ({
-            id: block.id,
-            type: block.type,
-            content: block.content,
-            metadata: block.metadata ? JSON.parse(block.metadata) : {},
-            createdAt: block.created_at,
-            updatedAt: block.updated_at
-          }))
-        };
-
-        subsectionPages.push(processedPage);
-      }
+      // Build hierarchical structure for subsection pages
+      const subsectionPages = await buildPageHierarchy(db, subsectionPageRows);
 
       subsections.push({
         id: subsection.id,
@@ -99,42 +146,12 @@ async function buildWorkspaceData(db: any, workspaceId: string) {
 
     // Get direct pages for this section (not in any subsection)
     const [directPageRows] = await db.execute(
-      'SELECT * FROM pages WHERE section_id = ? AND subsection_id IS NULL ORDER BY created_at ASC',
+      'SELECT * FROM pages WHERE section_id = ? AND subsection_id IS NULL ORDER BY page_order ASC, created_at ASC',
       [section.id]
     ) as [RowDataPacket[], any];
 
-    const directPages = [];
-
-    for (const page of directPageRows) {
-      // Get content blocks for this page
-      const [blockRows] = await db.execute(
-        'SELECT * FROM content_blocks WHERE page_id = ? ORDER BY block_order ASC',
-        [page.id]
-      ) as [RowDataPacket[], any];
-
-      const processedPage = {
-        id: page.id,
-        title: page.title,
-        icon: page.icon,
-        type: page.type,
-        status: page.status,
-        assignees: page.assignees ? JSON.parse(page.assignees) : [],
-        deadline: page.deadline,
-        properties: page.properties ? JSON.parse(page.properties) : {},
-        createdAt: page.created_at,
-        updatedAt: page.updated_at,
-        content: blockRows.map(block => ({
-          id: block.id,
-          type: block.type,
-          content: block.content,
-          metadata: block.metadata ? JSON.parse(block.metadata) : {},
-          createdAt: block.created_at,
-          updatedAt: block.updated_at
-        }))
-      };
-
-      directPages.push(processedPage);
-    }
+    // Build hierarchical structure for direct section pages
+    const directPages = await buildPageHierarchy(db, directPageRows);
 
     sections.push({
       id: section.id,
@@ -208,24 +225,23 @@ export async function GET(request: NextRequest) {
       console.log(`✅ Found ${workspaces.length} workspaces`);
       return NextResponse.json(workspaces);
     }
-    
+     
   } catch (error) {
-  console.error('❌ Error fetching workspaces:', error);
+    console.error('❌ Error fetching workspaces:', error);
 
-  let message = 'Unexpected error';
-  if (error instanceof Error) {
-    message = error.message;
+    let message = 'Unexpected error';
+    if (error instanceof Error) {
+      message = error.message;
+    }
+
+    return NextResponse.json(
+      { 
+        error: 'Internal server error',
+        details: process.env.NODE_ENV === 'development' ? message : undefined
+      },
+      { status: 500 }
+    );
   }
-
-  return NextResponse.json(
-    { 
-      error: 'Internal server error',
-      details: process.env.NODE_ENV === 'development' ? message : undefined
-    },
-    { status: 500 }
-  );
-}
-
 }
 
 // POST /api/workspaces - Create new workspace
@@ -322,22 +338,21 @@ export async function POST(request: NextRequest) {
     }
 
   } catch (error) {
-  console.error('❌ Error creating workspace:', error);
+    console.error('❌ Error creating workspace:', error);
 
-  let message = 'Unexpected error';
-  if (error instanceof Error) {
-    message = error.message;
+    let message = 'Unexpected error';
+    if (error instanceof Error) {
+      message = error.message;
+    }
+
+    return NextResponse.json(
+      { 
+        error: 'Failed to create workspace',
+        details: process.env.NODE_ENV === 'development' ? message : undefined
+      },
+      { status: 500 }
+    );
   }
-
-  return NextResponse.json(
-    { 
-      error: 'Failed to create workspace',
-      details: process.env.NODE_ENV === 'development' ? message : undefined
-    },
-    { status: 500 }
-  );
-}
-
 }
 
 // PUT /api/workspaces - Update workspace
@@ -399,22 +414,21 @@ export async function PUT(request: NextRequest) {
     return NextResponse.json(updatedWorkspaceData);
 
   } catch (error) {
-  console.error('❌ Error updating workspace:', error);
+    console.error('❌ Error updating workspace:', error);
 
-  let message = 'Unexpected error';
-  if (error instanceof Error) {
-    message = error.message;
+    let message = 'Unexpected error';
+    if (error instanceof Error) {
+      message = error.message;
+    }
+
+    return NextResponse.json(
+      { 
+        error: 'Failed to update workspace',
+        details: process.env.NODE_ENV === 'development' ? message : undefined
+      },
+      { status: 500 }
+    );
   }
-
-  return NextResponse.json(
-    { 
-      error: 'Failed to update workspace',
-      details: process.env.NODE_ENV === 'development' ? message : undefined
-    },
-    { status: 500 }
-  );
-}
-
 }
 
 // DELETE /api/workspaces - Delete workspace
@@ -487,20 +501,19 @@ export async function DELETE(request: NextRequest) {
     });
 
   } catch (error) {
-  console.error('❌ Error deleting workspace:', error);
+    console.error('❌ Error deleting workspace:', error);
 
-  let message = 'Unexpected error';
-  if (error instanceof Error) {
-    message = error.message;
+    let message = 'Unexpected error';
+    if (error instanceof Error) {
+      message = error.message;
+    }
+
+    return NextResponse.json(
+      { 
+        error: 'Failed to delete workspace',
+        details: process.env.NODE_ENV === 'development' ? message : undefined
+      },
+      { status: 500 }
+    );
   }
-
-  return NextResponse.json(
-    { 
-      error: 'Failed to delete workspace',
-      details: process.env.NODE_ENV === 'development' ? message : undefined
-    },
-    { status: 500 }
-  );
-}
-
 }

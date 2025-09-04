@@ -9,7 +9,8 @@ export interface DatabaseConfig {
   port: number;
 }
 
-let connection: mysql.Connection | null = null;
+// Use connection pool instead of single connection
+let pool: mysql.Pool | null = null;
 
 const dbConfig: DatabaseConfig = {
   host: process.env.DB_HOST || 'auth-db981.hstgr.io',
@@ -19,24 +20,123 @@ const dbConfig: DatabaseConfig = {
   port: parseInt(process.env.DB_PORT || '3306'),
 };
 
-export async function getConnection(): Promise<mysql.Connection> {
-  if (!connection) {
+// Create connection pool with proper configuration
+function createPool(): mysql.Pool {
+  return mysql.createPool({
+    host: dbConfig.host,
+    user: dbConfig.user,
+    password: dbConfig.password,
+    database: dbConfig.database,
+    port: dbConfig.port,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0,
+    acquireTimeout: 60000,
+    timeout: 60000,
+    // Proper SSL type handling
+    ...(process.env.NODE_ENV === 'production' ? {
+      ssl: {
+        rejectUnauthorized: false
+      }
+    } : {}),
+    supportBigNumbers: true,
+    bigNumberStrings: true,
+    charset: 'utf8mb4'
+  });
+}
+
+// Get connection from pool with retry logic
+export async function getConnection(): Promise<mysql.PoolConnection> {
+  if (!pool) {
+    console.log('🔄 Creating new database connection pool...');
+    pool = createPool();
+    
+    // Test pool connection
     try {
-      connection = await mysql.createConnection(dbConfig);
-      console.log('Database connected successfully');
+      const testConnection = await pool.getConnection();
+      await testConnection.execute('SELECT 1');
+      testConnection.release();
+      console.log('✅ Database pool created and tested successfully');
     } catch (error) {
-      console.error('Database connection failed:', error);
+      console.error('❌ Database pool creation failed:', error);
       throw error;
     }
   }
-  return connection;
+  
+  let retries = 3;
+  while (retries > 0) {
+    try {
+      const connection = await pool.getConnection();
+      return connection;
+    } catch (error: any) {
+      console.error(`Database connection error (${retries} retries left):`, error.message);
+      
+      if (retries === 1) {
+        // Last retry - recreate pool
+        console.log('🔄 Recreating database pool...');
+        if (pool) {
+          await pool.end();
+        }
+        pool = createPool();
+      }
+      
+      retries--;
+      if (retries > 0) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      } else {
+        throw error;
+      }
+    }
+  }
+  
+  throw new Error('Failed to get database connection after retries');
+}
+
+// Execute query with automatic connection management and retry logic
+export async function executeQuery<T = any>(
+  query: string, 
+  params: any[] = []
+): Promise<[T, mysql.FieldPacket[]]> {
+  let connection: mysql.PoolConnection | null = null;
+  let retries = 3;
+  
+  while (retries > 0) {
+    try {
+      connection = await getConnection();
+      const result = await connection.execute(query, params);
+      return result as [T, mysql.FieldPacket[]];
+    } catch (error: any) {
+      console.error(`Query execution error (${retries} retries left):`, {
+        error: error.message,
+        query: query.substring(0, 100) + '...',
+        code: error.code
+      });
+      
+      // Handle specific MySQL errors
+      if (error.code === 'PROTOCOL_CONNECTION_LOST' || 
+          error.code === 'ECONNRESET' || 
+          error.message?.includes('closed state')) {
+        
+        if (retries > 1) {
+          retries--;
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          continue;
+        }
+      }
+      
+      throw error;
+    } finally {
+      if (connection) {
+        connection.release();
+      }
+    }
+  }
+  
+  throw new Error('Query execution failed after retries');
 }
 
 // Create notification-related tables
 export async function createNotificationTables(): Promise<void> {
-  const db = await getConnection();
-
-  // Create notifications table
   const createNotificationsTable = `
     CREATE TABLE IF NOT EXISTS notifications (
       id VARCHAR(36) PRIMARY KEY,
@@ -65,9 +165,6 @@ export async function createNotificationTables(): Promise<void> {
       created_by INT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       read_at TIMESTAMP NULL,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
-      FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
       INDEX idx_user_id (user_id),
       INDEX idx_workspace_id (workspace_id),
       INDEX idx_type (type),
@@ -76,10 +173,9 @@ export async function createNotificationTables(): Promise<void> {
     )
   `;
   
-  await db.execute(createNotificationsTable);
+  await executeQuery(createNotificationsTable);
   console.log('✅ Notifications table created or already exists');
 
-  // Create notification preferences table
   const createNotificationPreferencesTable = `
     CREATE TABLE IF NOT EXISTS notification_preferences (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -92,15 +188,13 @@ export async function createNotificationTables(): Promise<void> {
       daily_digest BOOLEAN DEFAULT FALSE,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
       INDEX idx_user_id (user_id)
     )
   `;
   
-  await db.execute(createNotificationPreferencesTable);
+  await executeQuery(createNotificationPreferencesTable);
   console.log('✅ Notification preferences table created or already exists');
 
-  // Create notification batches table
   const createNotificationBatchesTable = `
     CREATE TABLE IF NOT EXISTS notification_batches (
       id VARCHAR(36) PRIMARY KEY,
@@ -112,46 +206,43 @@ export async function createNotificationTables(): Promise<void> {
       error_message TEXT NULL,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       processed_at TIMESTAMP NULL,
-      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
       INDEX idx_workspace_id (workspace_id),
       INDEX idx_status (status),
       INDEX idx_created_at (created_at)
     )
   `;
   
-  await db.execute(createNotificationBatchesTable);
+  await executeQuery(createNotificationBatchesTable);
   console.log('✅ Notification batches table created or already exists');
 }
 
-// Migration function to add missing columns to existing tables
+// Migration function with improved error handling
 export async function migrateExistingTables(): Promise<void> {
-  const db = await getConnection();
-  
   try {
     console.log('🔄 Checking for required database migrations...');
     
     // Check if parent_id column exists in pages table
-    const [parentIdColumns] = await db.execute(`
+    const [parentIdColumns] = await executeQuery(`
       SELECT COLUMN_NAME 
       FROM INFORMATION_SCHEMA.COLUMNS 
       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'pages' AND COLUMN_NAME = 'parent_id'
-    `, [dbConfig.database]) as any[];
+    `, [dbConfig.database]);
     
-    if (parentIdColumns.length === 0) {
+    if ((parentIdColumns as any[]).length === 0) {
       console.log('➕ Adding parent_id column to pages table...');
-      await db.execute(`
+      await executeQuery(`
         ALTER TABLE pages 
         ADD COLUMN parent_id VARCHAR(36) DEFAULT NULL AFTER subsection_id
       `);
       
       // Add index for parent_id
-      await db.execute(`
+      await executeQuery(`
         ALTER TABLE pages 
         ADD INDEX idx_parent_id (parent_id)
       `);
       
       // Add foreign key constraint
-      await db.execute(`
+      await executeQuery(`
         ALTER TABLE pages 
         ADD CONSTRAINT fk_pages_parent 
         FOREIGN KEY (parent_id) REFERENCES pages(id) ON DELETE CASCADE
@@ -163,21 +254,21 @@ export async function migrateExistingTables(): Promise<void> {
     }
     
     // Check if page_order column exists in pages table
-    const [orderColumns] = await db.execute(`
+    const [orderColumns] = await executeQuery(`
       SELECT COLUMN_NAME 
       FROM INFORMATION_SCHEMA.COLUMNS 
       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'pages' AND COLUMN_NAME = 'page_order'
-    `, [dbConfig.database]) as any[];
+    `, [dbConfig.database]);
     
-    if (orderColumns.length === 0) {
+    if ((orderColumns as any[]).length === 0) {
       console.log('➕ Adding page_order column to pages table...');
-      await db.execute(`
+      await executeQuery(`
         ALTER TABLE pages 
         ADD COLUMN page_order INT NOT NULL DEFAULT 0 AFTER properties
       `);
       
       // Add index for page_order
-      await db.execute(`
+      await executeQuery(`
         ALTER TABLE pages 
         ADD INDEX idx_page_order (page_order)
       `);
@@ -188,13 +279,13 @@ export async function migrateExistingTables(): Promise<void> {
     }
     
     // Check if page_files table exists
-    const [pageFilesTables] = await db.execute(`
+    const [pageFilesTables] = await executeQuery(`
       SELECT TABLE_NAME 
       FROM INFORMATION_SCHEMA.TABLES 
       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'page_files'
-    `, [dbConfig.database]) as any[];
+    `, [dbConfig.database]);
     
-    if (pageFilesTables.length === 0) {
+    if ((pageFilesTables as any[]).length === 0) {
       console.log('➕ Creating page_files table...');
       const createPageFilesTable = `
         CREATE TABLE page_files (
@@ -216,7 +307,7 @@ export async function migrateExistingTables(): Promise<void> {
         )
       `;
       
-      await db.execute(createPageFilesTable);
+      await executeQuery(createPageFilesTable);
       console.log('✅ page_files table created successfully');
     } else {
       console.log('✅ page_files table already exists');
@@ -230,21 +321,19 @@ export async function migrateExistingTables(): Promise<void> {
   }
 }
 
-// NEW: Migration function specifically for notification system
+// Notification system migration
 export async function migrateNotificationSystem(): Promise<void> {
-  const db = await getConnection();
-  
   try {
     console.log('🔄 Checking for notification system migrations...');
     
     // Check if notifications table exists
-    const [notificationTables] = await db.execute(`
+    const [notificationTables] = await executeQuery(`
       SELECT TABLE_NAME 
       FROM INFORMATION_SCHEMA.TABLES 
       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'notifications'
-    `, [dbConfig.database]) as any[];
+    `, [dbConfig.database]);
     
-    if (notificationTables.length === 0) {
+    if ((notificationTables as any[]).length === 0) {
       console.log('➕ Creating notification system tables...');
       await createNotificationTables();
       console.log('✅ Notification system tables created successfully');
@@ -252,13 +341,13 @@ export async function migrateNotificationSystem(): Promise<void> {
       console.log('✅ Notification system tables already exist');
       
       // Check if we need to migrate existing notification table structure
-      const [notificationColumns] = await db.execute(`
+      const [notificationColumns] = await executeQuery(`
         SELECT COLUMN_NAME 
         FROM INFORMATION_SCHEMA.COLUMNS 
         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'notifications'
-      `, [dbConfig.database]) as any[];
+      `, [dbConfig.database]);
       
-      const existingColumns = notificationColumns.map((col: any) => col.COLUMN_NAME);
+      const existingColumns = (notificationColumns as any[]).map((col: any) => col.COLUMN_NAME);
       const requiredColumns = ['id', 'user_id', 'workspace_id', 'type', 'title', 'message', 'metadata', 'is_read', 'is_email_sent', 'created_by', 'created_at', 'read_at'];
       
       for (const column of requiredColumns) {
@@ -267,19 +356,19 @@ export async function migrateNotificationSystem(): Promise<void> {
           // Add column based on type
           switch (column) {
             case 'workspace_id':
-              await db.execute(`ALTER TABLE notifications ADD COLUMN workspace_id VARCHAR(36) AFTER user_id`);
+              await executeQuery(`ALTER TABLE notifications ADD COLUMN workspace_id VARCHAR(36) AFTER user_id`);
               break;
             case 'metadata':
-              await db.execute(`ALTER TABLE notifications ADD COLUMN metadata JSON AFTER message`);
+              await executeQuery(`ALTER TABLE notifications ADD COLUMN metadata JSON AFTER message`);
               break;
             case 'is_email_sent':
-              await db.execute(`ALTER TABLE notifications ADD COLUMN is_email_sent BOOLEAN DEFAULT FALSE AFTER is_read`);
+              await executeQuery(`ALTER TABLE notifications ADD COLUMN is_email_sent BOOLEAN DEFAULT FALSE AFTER is_read`);
               break;
             case 'created_by':
-              await db.execute(`ALTER TABLE notifications ADD COLUMN created_by INT AFTER is_email_sent`);
+              await executeQuery(`ALTER TABLE notifications ADD COLUMN created_by INT AFTER is_email_sent`);
               break;
             case 'read_at':
-              await db.execute(`ALTER TABLE notifications ADD COLUMN read_at TIMESTAMP NULL AFTER created_at`);
+              await executeQuery(`ALTER TABLE notifications ADD COLUMN read_at TIMESTAMP NULL AFTER created_at`);
               break;
           }
         }
@@ -295,46 +384,32 @@ export async function migrateNotificationSystem(): Promise<void> {
 }
 
 // Auto-setup database and tables
-export async function setupDatabase(): Promise<mysql.Connection> {
-  let tempConnection: mysql.Connection | null = null;
-  
+export async function setupDatabase(): Promise<void> {
   try {
-    // Connect without specifying database to create it if needed
-    const tempConfig = { ...dbConfig };
-    delete (tempConfig as any).database;
-    
-    tempConnection = await mysql.createConnection(tempConfig);
+    // Test basic connection
+    await executeQuery('SELECT 1');
+    console.log('✅ Database connection verified');
     
     // Create database if not exists
-    await tempConnection.execute(`CREATE DATABASE IF NOT EXISTS \`${dbConfig.database}\``);
-    console.log(`Database ${dbConfig.database} created or already exists`);
-    
-    // Close temp connection and create main connection
-    await tempConnection.end();
-    connection = await mysql.createConnection(dbConfig);
+    await executeQuery(`CREATE DATABASE IF NOT EXISTS \`${dbConfig.database}\``);
+    console.log(`✅ Database ${dbConfig.database} ready`);
     
     // Create all required tables
     await createAuthTables();
     await createWorkspaceTables();
-    await createNotificationTables(); // Add this line
+    await createNotificationTables();
     await ensureDefaultWorkspace();
     
     console.log('✅ All tables created and default workspace ensured');
-    return connection;
     
   } catch (error) {
     console.error('❌ Database setup failed:', error);
-    if (tempConnection) {
-      await tempConnection.end();
-    }
     throw error;
   }
 }
 
 // Create authentication-related tables
 async function createAuthTables(): Promise<void> {
-  const db = await getConnection();
-
   // Create users table
   const createUsersTable = `
     CREATE TABLE IF NOT EXISTS users (
@@ -353,7 +428,7 @@ async function createAuthTables(): Promise<void> {
     )
   `;
   
-  await db.execute(createUsersTable);
+  await executeQuery(createUsersTable);
   console.log('✅ Users table created or already exists');
   
   // Create OTP table
@@ -371,7 +446,7 @@ async function createAuthTables(): Promise<void> {
     )
   `;
   
-  await db.execute(createOtpTable);
+  await executeQuery(createOtpTable);
   console.log('✅ OTP table created or already exists');
   
   // Create sessions table
@@ -388,7 +463,7 @@ async function createAuthTables(): Promise<void> {
     )
   `;
   
-  await db.execute(createSessionsTable);
+  await executeQuery(createSessionsTable);
   console.log('✅ Sessions table created or already exists');
 
   // Create login attempts table
@@ -404,14 +479,12 @@ async function createAuthTables(): Promise<void> {
     )
   `;
   
-  await db.execute(createLoginAttemptTable);
+  await executeQuery(createLoginAttemptTable);
   console.log('✅ Login attempts table created or already exists');
 }
 
 // Create Motion-Pro workspace-related tables
 async function createWorkspaceTables(): Promise<void> {
-  const db = await getConnection();
-
   // Create workspaces table
   const createWorkspacesTable = `
     CREATE TABLE IF NOT EXISTS workspaces (
@@ -426,7 +499,7 @@ async function createWorkspaceTables(): Promise<void> {
     )
   `;
   
-  await db.execute(createWorkspacesTable);
+  await executeQuery(createWorkspacesTable);
   console.log('✅ Workspaces table created or already exists');
 
   // Create workspace members table
@@ -447,7 +520,7 @@ async function createWorkspaceTables(): Promise<void> {
     )
   `;
   
-  await db.execute(createWorkspaceMembersTable);
+  await executeQuery(createWorkspaceMembersTable);
   console.log('✅ Workspace members table created or already exists');
 
   // Create sections table
@@ -466,7 +539,7 @@ async function createWorkspaceTables(): Promise<void> {
     )
   `;
   
-  await db.execute(createSectionsTable);
+  await executeQuery(createSectionsTable);
   console.log('✅ Sections table created or already exists');
 
   // Create subsections table
@@ -484,7 +557,7 @@ async function createWorkspaceTables(): Promise<void> {
     )
   `;
   
-  await db.execute(createSubsectionsTable);
+  await executeQuery(createSubsectionsTable);
   console.log('✅ Subsections table created or already exists');
 
   // Create pages table with nested page support
@@ -519,7 +592,7 @@ async function createWorkspaceTables(): Promise<void> {
     )
   `;
   
-  await db.execute(createPagesTable);
+  await executeQuery(createPagesTable);
   console.log('✅ Pages table created or already exists');
 
   // Enhanced content blocks table with more block types
@@ -566,7 +639,7 @@ async function createWorkspaceTables(): Promise<void> {
     )
   `;
   
-  await db.execute(createContentBlocksTable);
+  await executeQuery(createContentBlocksTable);
   console.log('✅ Content blocks table created or already exists');
 
   // Create comments table
@@ -586,7 +659,7 @@ async function createWorkspaceTables(): Promise<void> {
     )
   `;
   
-  await db.execute(createCommentsTable);
+  await executeQuery(createCommentsTable);
   console.log('✅ Comments table created or already exists');
 
   // Create page_files table for tracking file attachments
@@ -610,7 +683,7 @@ async function createWorkspaceTables(): Promise<void> {
     )
   `;
   
-  await db.execute(createPageFilesTable);
+  await executeQuery(createPageFilesTable);
   console.log('✅ Page files table created or already exists');
 
   // Create block_files table for file attachments within blocks
@@ -635,24 +708,22 @@ async function createWorkspaceTables(): Promise<void> {
     )
   `;
   
-  await db.execute(createBlockFilesTable);
+  await executeQuery(createBlockFilesTable);
   console.log('✅ Block files table created or already exists');
 }
 
 // Ensure default workspace exists
 export async function ensureDefaultWorkspace(): Promise<void> {
-  const db = await getConnection();
-  
   try {
     const workspaceId = 'default-workspace';
     
     // Check if default workspace specifically exists
-    const [existingWorkspace] = await db.execute(
+    const [existingWorkspace] = await executeQuery(
       'SELECT id FROM workspaces WHERE id = ?',
       [workspaceId]
-    ) as any[];
+    );
     
-    if (existingWorkspace.length > 0) {
+    if ((existingWorkspace as any[]).length > 0) {
       console.log('📦 Default workspace already exists');
       return;
     }
@@ -660,7 +731,7 @@ export async function ensureDefaultWorkspace(): Promise<void> {
     console.log('🌱 Creating default Motion-Pro workspace...');
     
     // Create default workspace with fixed ID
-    await db.execute(
+    await executeQuery(
       'INSERT INTO workspaces (id, name, description) VALUES (?, ?, ?)',
       [workspaceId, 'Motion-Pro Workspace', 'Default workspace for Motion-Pro dashboard']
     );
@@ -670,7 +741,7 @@ export async function ensureDefaultWorkspace(): Promise<void> {
     const member1Id = generateUUID();
     const member2Id = generateUUID();
     
-    await db.execute(`
+    await executeQuery(`
       INSERT INTO workspace_members (id, workspace_id, name, email, role) VALUES 
       (?, ?, 'Allan', 'allan@motionpro.com', 'owner'),
       (?, ?, 'Sagar Gupta', 'sagar@motionpro.com', 'admin')
@@ -686,7 +757,7 @@ export async function ensureDefaultWorkspace(): Promise<void> {
     ];
 
     for (const section of sections) {
-      await db.execute(
+      await executeQuery(
         'INSERT INTO sections (id, workspace_id, title, icon, section_order) VALUES (?, ?, ?, ?, ?)',
         [section.id, workspaceId, section.title, section.icon, section.order]
       );
@@ -699,7 +770,7 @@ export async function ensureDefaultWorkspace(): Promise<void> {
       ];
 
       for (const subsection of subsections) {
-        await db.execute(
+        await executeQuery(
           'INSERT INTO subsections (id, section_id, title, subsection_order) VALUES (?, ?, ?, ?)',
           [subsection.id, section.id, subsection.title, subsection.order]
         );
@@ -712,12 +783,12 @@ export async function ensureDefaultWorkspace(): Promise<void> {
     const marketingSection = sections[1];
     
     // Get marketing subsections
-    const [marketingSubsections] = await db.execute(
+    const [marketingSubsections] = await executeQuery(
       'SELECT id, title FROM subsections WHERE section_id = ? ORDER BY subsection_order',
       [marketingSection.id]
-    ) as any[];
+    );
 
-    const managementSubsection = marketingSubsections.find((sub: any) => sub.title === 'Management');
+    const managementSubsection = (marketingSubsections as any[]).find((sub: any) => sub.title === 'Management');
 
     const pages = [
       {
@@ -740,7 +811,7 @@ export async function ensureDefaultWorkspace(): Promise<void> {
     ];
 
     for (const page of pages) {
-      await db.execute(`
+      await executeQuery(`
         INSERT INTO pages (id, workspace_id, section_id, subsection_id, title, icon, type, status, assignees) 
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
@@ -767,20 +838,18 @@ export async function ensureDefaultWorkspace(): Promise<void> {
 
 // Migration for existing databases
 export async function migrateContentBlocksTable(): Promise<void> {
-  const db = await getConnection();
-  
   try {
     console.log('🔄 Migrating content_blocks table for enhanced types...');
     
     // Check current ENUM values
-    const [enumRows] = await db.execute(`
+    const [enumRows] = await executeQuery(`
       SELECT COLUMN_TYPE 
       FROM INFORMATION_SCHEMA.COLUMNS 
       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'content_blocks' AND COLUMN_NAME = 'type'
-    `, [dbConfig.database]) as any[];
+    `, [dbConfig.database]);
     
-    if (enumRows.length > 0) {
-      const currentEnum = enumRows[0].COLUMN_TYPE;
+    if ((enumRows as any[]).length > 0) {
+      const currentEnum = (enumRows as any[])[0].COLUMN_TYPE;
       
       // Check if we need to add new enum values
       const newTypes = [
@@ -806,7 +875,7 @@ export async function migrateContentBlocksTable(): Promise<void> {
       
       if (needsUpdate) {
         console.log('➕ Adding new block types to ENUM...');
-        await db.execute(`
+        await executeQuery(`
           ALTER TABLE content_blocks 
           MODIFY COLUMN type ENUM(
             'text', 
@@ -837,15 +906,15 @@ export async function migrateContentBlocksTable(): Promise<void> {
     }
     
     // Add parent_block_id column for nested blocks
-    const [parentIdColumns] = await db.execute(`
+    const [parentIdColumns] = await executeQuery(`
       SELECT COLUMN_NAME 
       FROM INFORMATION_SCHEMA.COLUMNS 
       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'content_blocks' AND COLUMN_NAME = 'parent_block_id'
-    `, [dbConfig.database]) as any[];
+    `, [dbConfig.database]);
     
-    if (parentIdColumns.length === 0) {
+    if ((parentIdColumns as any[]).length === 0) {
       console.log('➕ Adding parent_block_id column...');
-      await db.execute(`
+      await executeQuery(`
         ALTER TABLE content_blocks 
         ADD COLUMN parent_block_id VARCHAR(36) DEFAULT NULL AFTER metadata,
         ADD CONSTRAINT fk_content_blocks_parent 
@@ -900,13 +969,13 @@ function generateUUID(): string {
 
 // Connection pool management
 export async function closeConnection(): Promise<void> {
-  if (connection) {
+  if (pool) {
     try {
-      await connection.end();
-      connection = null;
-      console.log('Database connection closed');
+      await pool.end();
+      pool = null;
+      console.log('✅ Database connection pool closed');
     } catch (error) {
-      console.error('Error closing database connection:', error);
+      console.error('❌ Error closing database connection pool:', error);
     }
   }
 }
@@ -914,8 +983,7 @@ export async function closeConnection(): Promise<void> {
 // Health check function
 export async function checkDatabaseHealth(): Promise<boolean> {
   try {
-    const db = await getConnection();
-    await db.execute('SELECT 1');
+    await executeQuery('SELECT 1');
     return true;
   } catch (error) {
     console.error('Database health check failed:', error);
@@ -928,8 +996,8 @@ export async function initializeDatabase(): Promise<void> {
   try {
     console.log('🚀 Initializing Motion-Pro database...');
     await setupDatabase();
-    await migrateExistingTables(); // Run migration after setup
-    await migrateNotificationSystem(); // Add this line to initialize notifications
+    await migrateExistingTables();
+    await migrateNotificationSystem();
     console.log('✅ Database initialized successfully');
   } catch (error) {
     console.error('❌ Database initialization failed:', error);
@@ -941,32 +1009,170 @@ export async function initializeDatabase(): Promise<void> {
 
 // Cleanup expired records
 export async function cleanupExpiredRecords(): Promise<void> {
-  const db = await getConnection();
-  
   try {
-    const [otpResult] = await db.execute('DELETE FROM otps WHERE expires_at < NOW()') as any[];
-    const [sessionResult] = await db.execute('DELETE FROM sessions WHERE expires_at < NOW()') as any[];
+    const [otpResult] = await executeQuery('DELETE FROM otps WHERE expires_at < NOW()');
+    const [sessionResult] = await executeQuery('DELETE FROM sessions WHERE expires_at < NOW()');
     
-    console.log(`✅ Cleaned up ${otpResult.affectedRows} expired OTPs and ${sessionResult.affectedRows} expired sessions`);
+    console.log(`✅ Cleaned up ${(otpResult as any).affectedRows} expired OTPs and ${(sessionResult as any).affectedRows} expired sessions`);
   } catch (error) {
     console.error('❌ Cleanup failed:', error);
   }
 }
 
-// Graceful shutdown
+// Database statistics and monitoring
+export async function getDatabaseStats(): Promise<any> {
+  try {
+    const [userCount] = await executeQuery('SELECT COUNT(*) as count FROM users');
+    const [workspaceCount] = await executeQuery('SELECT COUNT(*) as count FROM workspaces');
+    const [pageCount] = await executeQuery('SELECT COUNT(*) as count FROM pages');
+    const [notificationCount] = await executeQuery('SELECT COUNT(*) as count FROM notifications');
+    
+    return {
+      users: (userCount as any[])[0].count,
+      workspaces: (workspaceCount as any[])[0].count,
+      pages: (pageCount as any[])[0].count,
+      notifications: (notificationCount as any[])[0].count,
+      timestamp: new Date().toISOString()
+    };
+  } catch (error) {
+    console.error('Failed to get database stats:', error);
+    return null;
+  }
+}
+
+// Database maintenance functions
+export async function optimizeTables(): Promise<void> {
+  try {
+    console.log('🔧 Optimizing database tables...');
+    
+    const tables = [
+      'users', 'sessions', 'otps', 'login_attempts',
+      'workspaces', 'workspace_members', 'sections', 'subsections',
+      'pages', 'content_blocks', 'comments', 'page_files', 'block_files',
+      'notifications', 'notification_preferences', 'notification_batches'
+    ];
+    
+    for (const table of tables) {
+      await executeQuery(`OPTIMIZE TABLE ${table}`);
+    }
+    
+    console.log('✅ Database tables optimized');
+  } catch (error) {
+    console.error('❌ Table optimization failed:', error);
+  }
+}
+
+// Backup database structure
+export async function backupDatabaseStructure(): Promise<string> {
+  try {
+    console.log('💾 Creating database structure backup...');
+    
+    const [tables] = await executeQuery(`
+      SELECT TABLE_NAME 
+      FROM INFORMATION_SCHEMA.TABLES 
+      WHERE TABLE_SCHEMA = ?
+    `, [dbConfig.database]);
+    
+    let backupScript = `-- Database Structure Backup\n-- Generated: ${new Date().toISOString()}\n\n`;
+    
+    for (const table of (tables as any[])) {
+      const [createStatement] = await executeQuery(`SHOW CREATE TABLE ${table.TABLE_NAME}`);
+      backupScript += `-- Table: ${table.TABLE_NAME}\n`;
+      backupScript += (createStatement as any[])[0]['Create Table'] + ';\n\n';
+    }
+    
+    console.log('✅ Database structure backup created');
+    return backupScript;
+  } catch (error) {
+    console.error('❌ Database structure backup failed:', error);
+    throw error;
+  }
+}
+
+// Performance monitoring
+export async function getConnectionPoolStatus(): Promise<any> {
+  if (!pool) {
+    return { status: 'No pool created' };
+  }
+  
+  try {
+    // Get basic pool information
+    return {
+      status: 'Active',
+      config: {
+        connectionLimit: 10,
+        maxIdle: 10,
+        idleTimeout: 60000,
+        acquireTimeout: 60000
+      },
+      timestamp: new Date().toISOString()
+    };
+  } catch (error) {
+    console.error('Failed to get pool status:', error);
+    return { status: 'Error', error: error };
+  }
+}
+
+// Database validation
+export async function validateDatabaseIntegrity(): Promise<boolean> {
+  try {
+    console.log('🔍 Validating database integrity...');
+    
+    // Check for orphaned records
+    const checks = [
+      'SELECT COUNT(*) as count FROM workspace_members WHERE workspace_id NOT IN (SELECT id FROM workspaces)',
+      'SELECT COUNT(*) as count FROM sections WHERE workspace_id NOT IN (SELECT id FROM workspaces)',
+      'SELECT COUNT(*) as count FROM pages WHERE workspace_id NOT IN (SELECT id FROM workspaces)',
+      'SELECT COUNT(*) as count FROM notifications WHERE user_id NOT IN (SELECT id FROM users)'
+    ];
+    
+    for (const check of checks) {
+      const [result] = await executeQuery(check);
+      if ((result as any[])[0].count > 0) {
+        console.warn(`Found orphaned records: ${check}`);
+        return false;
+      }
+    }
+    
+    console.log('✅ Database integrity validation passed');
+    return true;
+  } catch (error) {
+    console.error('❌ Database integrity validation failed:', error);
+    return false;
+  }
+}
+
+// Graceful shutdown handlers
 process.on('SIGINT', async () => {
-  console.log('Received SIGINT, closing database connection...');
+  console.log('Received SIGINT, closing database connection pool...');
   await closeConnection();
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
-  console.log('Received SIGTERM, closing database connection...');
+  console.log('Received SIGTERM, closing database connection pool...');
   await closeConnection();
   process.exit(0);
 });
 
+// Handle uncaught exceptions
+process.on('uncaughtException', async (error) => {
+  console.error('Uncaught Exception:', error);
+  await closeConnection();
+  process.exit(1);
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', async (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  await closeConnection();
+  process.exit(1);
+});
+
 // Auto-initialize in development
 if (process.env.NODE_ENV === 'development') {
-  initializeDatabase();
+  initializeDatabase().catch(error => {
+    console.error('Failed to initialize database in development:', error);
+    process.exit(1);
+  });
 }
